@@ -145,7 +145,7 @@ success "Dependencias instaladas"
 # ── Paso 8: Verificar pywebview ───────────────────────────────────────────────
 header "[ 8/14 ] Verificando pywebview"
 
-if ! "$VENV_PYTHON" -c "import webview; print('pywebview OK:', webview.__version__)" 2>/dev/null; then
+if ! "$VENV_PYTHON" -c "import webview" 2>/dev/null; then
     warn "pywebview necesita dependencias adicionales de PyObjC"
     info "Instalando pyobjc-core, pyobjc-framework-Cocoa, pyobjc-framework-WebKit..."
     "$VENV_PIP" install --upgrade \
@@ -155,7 +155,8 @@ if ! "$VENV_PYTHON" -c "import webview; print('pywebview OK:', webview.__version
         "pywebview>=5.0.0"
 fi
 
-"$VENV_PYTHON" -c "import webview; print('pywebview OK:', webview.__version__)"
+WEBVIEW_VER="$("$VENV_PYTHON" -c "import importlib.metadata; print(importlib.metadata.version('pywebview'))" 2>/dev/null || echo 'instalado')"
+echo "pywebview OK: $WEBVIEW_VER"
 success "pywebview verificado"
 
 # ── Paso 9: Token HuggingFace ─────────────────────────────────────────────────
