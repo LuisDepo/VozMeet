@@ -2,7 +2,12 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Always load .env from ~/VozMeet/.env so it works both in dev and as a bundled .app
+_env_path = Path.home() / "VozMeet" / ".env"
+if _env_path.exists():
+    load_dotenv(dotenv_path=_env_path)
+else:
+    load_dotenv()
 
 PROJECT_DIR = Path.home() / "VozMeet"
 
