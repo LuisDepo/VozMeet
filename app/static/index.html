@@ -131,6 +131,19 @@
         <div class="card">
           <div id="segments-container" class="card-body" style="padding:8px" role="list" aria-label="Segmentos de la transcripción"></div>
         </div>
+        <!-- Mini audio player -->
+        <div id="transcript-player" class="transcript-player hidden">
+          <audio id="transcript-audio" preload="none"></audio>
+          <button id="player-playpause" class="player-playpause" aria-label="Play/Pausa">▶</button>
+          <span id="player-current">0:00</span>
+          <div class="player-bar-wrap" id="player-bar-wrap">
+            <div class="player-bar-bg">
+              <div class="player-bar-fill" id="player-bar-fill"></div>
+            </div>
+          </div>
+          <span id="player-duration">0:00</span>
+          <button id="player-close" class="player-close" aria-label="Cerrar reproductor">✕</button>
+        </div>
       </section>
 
       <!-- ── View: History ─────────────────────────────── -->

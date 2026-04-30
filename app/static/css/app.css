@@ -336,8 +336,14 @@
   border-radius: var(--radius-sm);
   margin-bottom: 4px;
   transition: var(--transition);
+  cursor: pointer;
 }
 .segment:hover { background: var(--bg-secondary); }
+.segment-active {
+  background: rgba(0,122,255,0.08) !important;
+  border-left: 3px solid var(--apple-blue);
+  padding-left: 11px;
+}
 
 .segment-ts {
   font-family: var(--font-mono);
@@ -359,6 +365,71 @@
 .segment-text { font-size: 14px; line-height: 1.55; }
 
 .highlight { background: rgba(255,215,0,0.35); border-radius: 2px; }
+
+/* ─── Transcript mini player ──────────────────────── */
+.transcript-player {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: rgba(255,255,255,0.92);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-top: 1px solid var(--separator);
+  border-radius: 0 0 var(--radius) var(--radius);
+  margin-top: 8px;
+  box-shadow: 0 -4px 16px rgba(0,0,0,0.06);
+}
+@media (prefers-color-scheme: dark) {
+  .transcript-player { background: rgba(28,28,30,0.92); }
+}
+.player-playpause {
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  background: var(--apple-blue);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.player-playpause:hover { background: var(--apple-blue-hover); }
+.player-bar-wrap {
+  flex: 1;
+  cursor: pointer;
+  padding: 8px 0;
+}
+.player-bar-bg {
+  height: 4px;
+  background: var(--separator);
+  border-radius: 2px;
+  position: relative;
+  overflow: hidden;
+}
+.player-bar-fill {
+  height: 100%;
+  background: var(--apple-blue);
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.25s linear;
+}
+#player-current, #player-duration {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-width: 38px;
+}
+.player-close {
+  background: none;
+  border: none;
+  font-size: 16px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 4px;
+}
 
 /* ─── View: History ───────────────────────────────── */
 #view-history .recording-row {

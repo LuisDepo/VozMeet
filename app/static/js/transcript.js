@@ -5,8 +5,11 @@ const Transcript = (() => {
   let transcriptData = null;
   let speakerColorMap = {};
   let allSegments = [];
+  let currentRecordingId = null;
+  let activeSegmentEl = null;
 
   async function load(recordingId) {
+    currentRecordingId = recordingId;
     try {
       transcriptData = await API.getTranscript(recordingId);
     } catch (err) {
@@ -30,6 +33,7 @@ const Transcript = (() => {
     populateFilter(transcriptData.participants);
     renderSegments(allSegments, '');
     setupExportBtns(recordingId);
+    setupPlayer(recordingId);
   }
 
   function populateFilter(participants) {
@@ -55,6 +59,8 @@ const Transcript = (() => {
     segs.forEach(seg => {
       const div = document.createElement('div');
       div.className = 'segment';
+      div.dataset.start = seg.start;
+      div.title = 'Clic para escuchar desde aquí';
 
       const colorClass = speakerColorMap[seg.speaker] || 'spk-text-0';
       let textContent = escHtml(seg.text);
@@ -67,10 +73,84 @@ const Transcript = (() => {
         <div class="segment-ts">${fmtTs(seg.start)}</div>
         <div class="segment-speaker ${colorClass}">${escHtml(seg.speaker)}</div>
         <div class="segment-text">${textContent}</div>`;
+
+      div.addEventListener('click', () => seekTo(seg.start, div));
       container.appendChild(div);
     });
   }
 
+  // ── Player ──────────────────────────────────────────────────────
+  function setupPlayer(recordingId) {
+    const audio = document.getElementById('transcript-audio');
+    const player = document.getElementById('transcript-player');
+    const btnPP = document.getElementById('player-playpause');
+    const fill = document.getElementById('player-bar-fill');
+    const curEl = document.getElementById('player-current');
+    const durEl = document.getElementById('player-duration');
+    const barWrap = document.getElementById('player-bar-wrap');
+    const btnClose = document.getElementById('player-close');
+
+    audio.src = `/api/audio/recording/${recordingId}`;
+
+    audio.addEventListener('loadedmetadata', () => {
+      durEl.textContent = fmtTs(audio.duration);
+    });
+
+    audio.addEventListener('timeupdate', () => {
+      curEl.textContent = fmtTs(audio.currentTime);
+      const pct = audio.duration ? (audio.currentTime / audio.duration * 100) : 0;
+      fill.style.width = pct + '%';
+      highlightActiveSegment(audio.currentTime);
+    });
+
+    audio.addEventListener('play',  () => { btnPP.textContent = '⏸'; });
+    audio.addEventListener('pause', () => { btnPP.textContent = '▶'; });
+    audio.addEventListener('ended', () => { btnPP.textContent = '▶'; });
+
+    btnPP.addEventListener('click', () => {
+      if (audio.paused) audio.play(); else audio.pause();
+    });
+
+    barWrap.addEventListener('click', e => {
+      if (!audio.duration) return;
+      const rect = barWrap.getBoundingClientRect();
+      const pct = (e.clientX - rect.left) / rect.width;
+      audio.currentTime = pct * audio.duration;
+    });
+
+    btnClose.addEventListener('click', () => {
+      audio.pause();
+      player.classList.add('hidden');
+    });
+  }
+
+  function seekTo(startSec, segEl) {
+    const audio = document.getElementById('transcript-audio');
+    const player = document.getElementById('transcript-player');
+    player.classList.remove('hidden');
+    audio.currentTime = startSec;
+    audio.play();
+    if (activeSegmentEl) activeSegmentEl.classList.remove('segment-active');
+    activeSegmentEl = segEl;
+    segEl.classList.add('segment-active');
+  }
+
+  function highlightActiveSegment(currentTime) {
+    const container = document.getElementById('segments-container');
+    const rows = container.querySelectorAll('.segment[data-start]');
+    let best = null;
+    rows.forEach(row => {
+      const t = parseFloat(row.dataset.start);
+      if (t <= currentTime) best = row;
+    });
+    if (best && best !== activeSegmentEl) {
+      if (activeSegmentEl) activeSegmentEl.classList.remove('segment-active');
+      activeSegmentEl = best;
+      best.classList.add('segment-active');
+    }
+  }
+
+  // ── Search / filter ─────────────────────────────────────────────
   function onSearch() {
     const q = document.getElementById('transcript-search').value.trim();
     const spk = document.getElementById('speaker-filter').value;
@@ -106,6 +186,7 @@ const Transcript = (() => {
     });
   }
 
+  // ── Helpers ──────────────────────────────────────────────────────
   function fmtTs(sec) {
     const h = Math.floor(sec / 3600);
     const m = Math.floor((sec % 3600) / 60);
