@@ -1,0 +1,49 @@
+# Entorno virtual
+.venv/
+venv/
+env/
+
+# Variables de entorno (contiene token privado)
+.env
+
+# Base de datos
+data/vozmeet.db
+data/vozmeet.db-wal
+data/vozmeet.db-shm
+
+# Archivos de usuario
+data/uploads/
+data/processed/
+data/transcripts/
+data/voice_samples/
+
+# Bundle macOS generado
+VozMeet.app/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+
+# Logs
+*.log
+uvicorn.log
+
+# Caché de modelos (demasiado grande para git)
+.cache/
+models/
