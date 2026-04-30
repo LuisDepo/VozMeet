@@ -2,7 +2,7 @@ import logging
 import sys
 from pathlib import Path
 
-LOG_PATH = Path.home() / "VozMeet" / "data" / "vozmeet.log"
+LOG_PATH = Path(__file__).parent.parent / "data" / "vozmeet.log"
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 _fmt = logging.Formatter(

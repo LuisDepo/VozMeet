@@ -5,7 +5,7 @@ from app.database.db import get_db
 
 router = APIRouter()
 
-LOG_PATH = Path.home() / "VozMeet" / "data" / "vozmeet.log"
+LOG_PATH = Path(__file__).parent.parent.parent / "data" / "vozmeet.log"
 
 
 @router.get("/logs")
