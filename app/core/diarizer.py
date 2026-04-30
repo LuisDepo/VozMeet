@@ -67,31 +67,3 @@ def diarize(audio_path: str | Path) -> list[dict]:
 
     segments.sort(key=lambda x: x["start"])
     return segments
-
-
-
-def diarize(audio_path: str | Path) -> list[dict]:
-    pipe = _get_pipeline()
-    audio_path = str(audio_path)
-
-    result = pipe(audio_path)
-
-    # pyannote >= 3.3 returns DiarizeOutput with .speaker_diarization (Annotation)
-    # older versions return Annotation directly
-    if hasattr(result, 'speaker_diarization'):
-        annotation = result.speaker_diarization
-    elif hasattr(result, 'diarization'):
-        annotation = result.diarization
-    else:
-        annotation = result
-
-    segments = []
-    for turn, _, speaker in annotation.itertracks(yield_label=True):
-        segments.append({
-            "speaker": speaker,
-            "start": round(turn.start, 3),
-            "end": round(turn.end, 3),
-        })
-
-    segments.sort(key=lambda x: x["start"])
-    return segments

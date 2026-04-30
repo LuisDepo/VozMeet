@@ -176,13 +176,29 @@ const Transcript = (() => {
   function setupExportBtns(recordingId) {
     ['txt', 'md', 'json'].forEach(fmt => {
       const btn = document.getElementById(`export-${fmt}-btn`);
-      if (btn) {
-        btn.onclick = () => {
-          const a = document.createElement('a');
-          a.href = API.exportUrl(recordingId, fmt);
-          a.click();
-        };
-      }
+      if (!btn) return;
+      btn.onclick = async () => {
+        btn.disabled = true;
+        const orig = btn.textContent;
+        btn.textContent = '…';
+        try {
+          if (window.pywebview && window.pywebview.api) {
+            const result = await window.pywebview.api.save_to_downloads(recordingId, fmt);
+            if (result.ok) {
+              showToast(`Guardado en Descargas: ${result.filename}`, 'success');
+            } else {
+              showToast('Error al exportar: ' + result.error, 'error');
+            }
+          } else {
+            window.location.href = API.exportUrl(recordingId, fmt);
+          }
+        } catch (e) {
+          showToast('Error al exportar: ' + e.message, 'error');
+        } finally {
+          btn.disabled = false;
+          btn.textContent = orig;
+        }
+      };
     });
   }
 

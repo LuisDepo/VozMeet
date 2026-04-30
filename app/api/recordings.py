@@ -230,6 +230,25 @@ def get_transcript(recording_id: int):
     }
 
 
+@router.post("/recordings/{recording_id}/resume")
+def resume_recording(recording_id: int):
+    with get_db() as conn:
+        rec = conn.execute(
+            "SELECT * FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()
+        if not rec:
+            raise HTTPException(status_code=404, detail="Grabación no encontrada.")
+        conn.execute("DELETE FROM segments WHERE recording_id = ?", (recording_id,))
+        conn.execute("DELETE FROM recording_speakers WHERE recording_id = ?", (recording_id,))
+        conn.execute(
+            "UPDATE recordings SET status='uploaded', error_message=NULL, "
+            "processed_path=NULL, duration_seconds=NULL, language_detected=NULL, "
+            "speaker_count=NULL, completed_at=NULL WHERE id = ?",
+            (recording_id,),
+        )
+    return {"ok": True, "recording_id": recording_id}
+
+
 @router.delete("/recordings/{recording_id}")
 def delete_recording(recording_id: int):
     with get_db() as conn:

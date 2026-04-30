@@ -84,3 +84,9 @@ def init_db():
         conn.execute(CREATE_RECORDINGS)
         conn.execute(CREATE_SEGMENTS)
         conn.execute(CREATE_RECORDING_SPEAKERS)
+        # Any recording still "processing" was interrupted by a previous crash/quit
+        conn.execute(
+            "UPDATE recordings SET status='interrupted', "
+            "error_message='Proceso interrumpido al cerrar la app' "
+            "WHERE status='processing'"
+        )

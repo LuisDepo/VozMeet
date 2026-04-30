@@ -84,6 +84,7 @@ async function loadHistory() {
         error: '<span class="badge badge-red">Error</span>',
         identifying: '<span class="badge badge-orange">Pendiente</span>',
         uploaded: '<span class="badge badge-gray">Subido</span>',
+        interrupted: '<span class="badge badge-orange">Proceso detenido</span>',
       }[rec.status] || `<span class="badge badge-gray">${rec.status}</span>`;
 
       const dur = rec.duration_seconds ? fmtDurationShort(rec.duration_seconds) : '—';
@@ -106,6 +107,9 @@ async function loadHistory() {
           ${rec.status === 'error'
             ? `<button class="btn btn-sm btn-secondary" onclick="showErrorDetail(${rec.id})" aria-label="Ver error">Ver error</button>`
             : ''}
+          ${rec.status === 'interrupted'
+            ? `<button class="btn btn-sm btn-primary" onclick="resumeRecording(${rec.id}, '${escHtml(rec.filename)}')" aria-label="Reanudar procesamiento">Reanudar</button>`
+            : ''}
           <button class="btn btn-sm btn-danger" onclick="deleteRecording(${rec.id})" aria-label="Eliminar grabación">🗑</button>
         </div>`;
       container.appendChild(row);
@@ -125,6 +129,32 @@ async function openRecording(id, status) {
   } else {
     showView('transcript');
     await Transcript.load(id);
+  }
+}
+
+async function resumeRecording(id, filename) {
+  try {
+    await fetch(`/api/recordings/${id}/resume`, { method: 'POST' });
+    showView('processing');
+    Process.start(id, filename,
+      (recId) => {
+        showView('identify');
+        Identify.load(recId, (finalId) => {
+          showView('transcript');
+          Transcript.load(finalId);
+        });
+      },
+      (errMsg, recId) => {
+        const t = showToast('❌ Error: ' + errMsg + ' — revisa el log para más detalles.', 'error', 0);
+        t.style.cursor = 'pointer';
+        t.style.maxWidth = '400px';
+        if (recId) t.onclick = () => { showErrorDetail(recId); t.remove(); };
+        showView('history');
+        loadHistory();
+      }
+    );
+  } catch (err) {
+    showToast('Error al reanudar: ' + err.message, 'error');
   }
 }
 
