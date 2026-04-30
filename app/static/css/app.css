@@ -236,6 +236,30 @@
 }
 
 .identity-search-wrap { position: relative; flex: 1; }
+.identity-input {
+  font-family: var(--font);
+  font-size: 15px;
+  padding: 9px 14px;
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text-primary);
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+  transition: var(--transition);
+}
+.identity-input:focus {
+  border-color: var(--apple-blue);
+  box-shadow: 0 0 0 3px rgba(0,122,255,0.15);
+}
+@media (prefers-color-scheme: dark) {
+  .identity-input {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border-color: var(--separator);
+  }
+}
 .identity-dropdown {
   position: absolute;
   top: 100%;

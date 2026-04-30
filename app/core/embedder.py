@@ -48,6 +48,18 @@ def get_embedding(audio_path: str | Path, start: float = 0.0, end: Optional[floa
     return emb.astype(np.float32)
 
 
+def _find_ffmpeg() -> str:
+    import shutil, os
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    for p in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+        candidate = os.path.join(p, "ffmpeg")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    raise RuntimeError("ffmpeg no encontrado")
+
+
 def extract_sample(
     audio_path: str | Path,
     start: float,
@@ -58,7 +70,7 @@ def extract_sample(
     duration = min(end - start, SAMPLE_DURATION_SECONDS)
     output_path = VOICE_SAMPLES_DIR / output_name
     cmd = [
-        "ffmpeg", "-y",
+        _find_ffmpeg(), "-y",
         "-i", str(audio_path),
         "-ss", str(start),
         "-t", str(duration),
