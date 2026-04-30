@@ -13,7 +13,7 @@ TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 VOICE_SAMPLES_DIR = DATA_DIR / "voice_samples"
 DB_PATH = DATA_DIR / "vozmeet.db"
 
-WHISPER_MODEL = "large-v3"
+WHISPER_MODEL = "large-v3-turbo"
 WHISPER_COMPUTE_TYPE = "int8"
 WHISPER_DEVICE = "auto"
 

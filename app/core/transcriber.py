@@ -27,8 +27,10 @@ def transcribe(audio_path: str | Path, language: Optional[str] = None) -> dict:
     segments_iter, info = model.transcribe(
         audio_path,
         language=language,
-        beam_size=5,
+        beam_size=1,
         word_timestamps=False,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 500},
     )
 
     segments = []
