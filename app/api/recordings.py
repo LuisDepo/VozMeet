@@ -4,8 +4,10 @@ from pydantic import BaseModel
 from app.database.db import get_db
 from app.database.voice_store import save_speaker, update_speaker_embedding, find_matching_speaker
 from app.core.pipeline import get_pipeline_result
+from app.logger import get_logger
 
 router = APIRouter()
+log = get_logger("recordings")
 
 
 class IdentifyPayload(BaseModel):
@@ -99,6 +101,16 @@ def get_recording_speakers(recording_id: int):
 
 @router.post("/recordings/{recording_id}/identify")
 def identify_speakers(recording_id: int, payload: IdentifyPayload):
+    try:
+        return _identify_speakers_impl(recording_id, payload)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("[%d] Error in identify endpoint", recording_id)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+def _identify_speakers_impl(recording_id: int, payload: IdentifyPayload):
     pipeline_result = get_pipeline_result(recording_id)
 
     with get_db() as conn:
