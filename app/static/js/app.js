@@ -18,7 +18,43 @@ function showToast(msg, type = 'info', duration = 3500) {
   toast.className = `toast toast-${type}`;
   toast.textContent = msg;
   container.appendChild(toast);
-  setTimeout(() => toast.remove(), duration);
+  if (duration > 0) setTimeout(() => toast.remove(), duration);
+  return toast;
+}
+
+async function showErrorDetail(recordingId) {
+  try {
+    const data = await fetch(`/api/recordings/${recordingId}/error`).then(r => r.json());
+    const msg = data.error || 'Sin detalles de error disponibles.';
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px';
+    overlay.innerHTML = `
+      <div style="background:var(--bg);border-radius:16px;max-width:640px;width:100%;box-shadow:0 24px 48px rgba(0,0,0,0.2);overflow:hidden">
+        <div style="padding:20px 24px;border-bottom:1px solid var(--separator);display:flex;align-items:center;justify-content:space-between">
+          <span style="font-weight:700;font-size:16px">❌ Detalle del error</span>
+          <button onclick="this.closest('[style]').remove()" style="border:none;background:none;font-size:20px;cursor:pointer;color:var(--text-tertiary)">✕</button>
+        </div>
+        <pre style="padding:20px 24px;font-family:var(--font-mono);font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-all;max-height:400px;overflow-y:auto;color:var(--apple-red)">${escHtml(msg)}</pre>
+        <div style="padding:16px 24px;border-top:1px solid var(--separator);display:flex;gap:10px;justify-content:flex-end">
+          <button class="btn btn-secondary btn-sm" onclick="copyLog()">Copiar log completo</button>
+          <button class="btn btn-primary btn-sm" onclick="this.closest('[style]').remove()">Cerrar</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  } catch (e) {
+    showToast('No se pudo obtener el detalle del error.', 'error');
+  }
+}
+
+async function copyLog() {
+  try {
+    const text = await fetch('/api/logs?lines=200').then(r => r.text());
+    await navigator.clipboard.writeText(text);
+    showToast('Log copiado al portapapeles.', 'success');
+  } catch {
+    showToast('No se pudo copiar.', 'error');
+  }
 }
 
 // ─── History view ──────────────────────────────────────────────────────────────
@@ -66,6 +102,9 @@ async function loadHistory() {
         <div class="recording-actions">
           ${rec.status === 'done' || rec.status === 'identifying'
             ? `<button class="btn btn-sm btn-primary" onclick="openRecording(${rec.id}, '${rec.status}')" aria-label="Ver transcripción">Ver</button>`
+            : ''}
+          ${rec.status === 'error'
+            ? `<button class="btn btn-sm btn-secondary" onclick="showErrorDetail(${rec.id})" aria-label="Ver error">Ver error</button>`
             : ''}
           <button class="btn btn-sm btn-danger" onclick="deleteRecording(${rec.id})" aria-label="Eliminar grabación">🗑</button>
         </div>`;
@@ -202,9 +241,14 @@ document.addEventListener('DOMContentLoaded', () => {
           Transcript.load(id);
         });
       },
-      (errMsg) => {
-        showToast('Error de procesamiento: ' + errMsg, 'error');
+      (errMsg, recId) => {
+        // Show persistent error (duration=0 means no auto-dismiss)
+        const t = showToast('❌ Error: ' + errMsg + ' — revisa el log para más detalles.', 'error', 0);
+        t.style.cursor = 'pointer';
+        t.style.maxWidth = '400px';
+        if (recId) t.onclick = () => { showErrorDetail(recId); t.remove(); };
         showView('upload');
+        loadHistory();
       }
     );
   });

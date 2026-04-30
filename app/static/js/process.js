@@ -25,7 +25,7 @@ const Process = (() => {
     document.getElementById('processing-filename').textContent = filename;
     setStage(5, 'Iniciando...', 'Cargando modelos de IA (puede tardar varios minutos la primera vez)...');
 
-    API.startProcess(recordingId).catch(err => onError(err.message));
+    API.startProcess(recordingId).catch(err => onError(err.message, recordingId));
 
     const es = API.progressStream(recordingId);
 
@@ -43,7 +43,7 @@ const Process = (() => {
 
       if (data.percent === -1) {
         es.close();
-        onError(data.detail || 'Error desconocido durante el procesamiento.');
+        onError(data.detail || 'Error desconocido durante el procesamiento.', recordingId);
         return;
       }
 

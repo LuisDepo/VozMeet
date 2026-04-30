@@ -1,12 +1,15 @@
 import threading
+import traceback
 from pathlib import Path
 from typing import Callable, Optional
 from app.config import (
-    UPLOADS_DIR, MIN_AUDIO_DURATION_SECONDS, MAX_SPEAKERS_WARNING,
-    SAMPLE_DURATION_SECONDS, AUTO_CONFIRM_THRESHOLD
+    MIN_AUDIO_DURATION_SECONDS, MAX_SPEAKERS_WARNING,
 )
 from app.database.db import get_db
 from app.database.voice_store import find_matching_speaker
+from app.logger import get_logger
+
+log = get_logger("pipeline")
 
 _progress_callbacks: dict[int, Callable] = {}
 _pipeline_results: dict[int, dict] = {}
@@ -26,15 +29,17 @@ def get_pipeline_error(recording_id: int) -> Optional[str]:
 
 
 def _notify(recording_id: int, percent: int, stage: str, detail: str = ""):
+    log.info("[%d] %d%% — %s %s", recording_id, percent, stage, detail)
     cb = _progress_callbacks.get(recording_id)
     if cb:
         cb({"percent": percent, "stage": stage, "detail": detail})
 
-    with get_db() as conn:
-        conn.execute(
-            "UPDATE recordings SET status = ? WHERE id = ?",
-            ("processing", recording_id),
-        )
+    if percent != -1:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE recordings SET status = 'processing' WHERE id = ?",
+                (recording_id,),
+            )
 
 
 def run_pipeline(recording_id: int, file_path: str):
@@ -50,12 +55,17 @@ def _pipeline_worker(recording_id: int, file_path: str):
     try:
         _execute_pipeline(recording_id, file_path)
     except Exception as e:
-        _pipeline_errors[recording_id] = str(e)
-        _notify(recording_id, -1, "error", str(e))
+        full_error = traceback.format_exc()
+        log.error("[%d] Pipeline error:\n%s", recording_id, full_error)
+        short_msg = str(e)
+        _pipeline_errors[recording_id] = full_error
+        cb = _progress_callbacks.get(recording_id)
+        if cb:
+            cb({"percent": -1, "stage": "error", "detail": short_msg})
         with get_db() as conn:
             conn.execute(
                 "UPDATE recordings SET status = 'error', error_message = ? WHERE id = ?",
-                (str(e)[:1000], recording_id),
+                (full_error[:2000], recording_id),
             )
 
 
@@ -66,12 +76,14 @@ def _execute_pipeline(recording_id: int, file_path: str):
     from app.core.embedder import get_embedding, extract_sample
     from app.core.merger import merge
 
-    _notify(recording_id, 5, "Extrayendo audio", "Procesando con ffmpeg...")
+    log.info("[%d] Pipeline starting for: %s", recording_id, file_path)
 
+    _notify(recording_id, 5, "Extrayendo audio", "Procesando con ffmpeg...")
     output_name = f"recording_{recording_id}.wav"
     audio_info = extract_audio(file_path, output_name)
     wav_path = audio_info["output_path"]
     duration = audio_info["duration"]
+    log.info("[%d] Audio extracted: %s (%.1fs)", recording_id, wav_path, duration)
 
     with get_db() as conn:
         conn.execute(
@@ -84,12 +96,13 @@ def _execute_pipeline(recording_id: int, file_path: str):
     if duration < MIN_AUDIO_DURATION_SECONDS:
         _notify(recording_id, 18, "Advertencia", f"Audio corto ({duration:.1f}s). Procesando igualmente.")
 
-    _notify(recording_id, 20, "Iniciando transcripción", "Cargando modelo Whisper large-v3...")
-
+    _notify(recording_id, 20, "Iniciando transcripción", "Cargando modelo Whisper large-v3 (primera vez: varios minutos)...")
+    log.info("[%d] Starting transcription", recording_id)
     transcript_result = transcribe(wav_path)
     transcript_segments = transcript_result["segments"]
     language = transcript_result["language"]
     language_display = transcript_result["language_display"]
+    log.info("[%d] Transcription done: %d segments, lang=%s", recording_id, len(transcript_segments), language)
 
     with get_db() as conn:
         conn.execute(
@@ -97,14 +110,15 @@ def _execute_pipeline(recording_id: int, file_path: str):
             (language_display, recording_id),
         )
 
-    _notify(recording_id, 55, "Transcripción completa", f"Idioma: {language_display}")
+    _notify(recording_id, 55, "Transcripción completa", f"Idioma: {language_display} · {len(transcript_segments)} segmentos")
 
-    _notify(recording_id, 60, "Iniciando diarización", "Identificando hablantes con pyannote...")
-
+    _notify(recording_id, 60, "Iniciando diarización", "Identificando hablantes con pyannote (primera vez: varios minutos)...")
+    log.info("[%d] Starting diarization", recording_id)
     diarization_segments = diarize(wav_path)
 
     unique_speakers = list({s["speaker"] for s in diarization_segments})
     speaker_count = len(unique_speakers)
+    log.info("[%d] Diarization done: %d speakers", recording_id, speaker_count)
 
     if speaker_count > MAX_SPEAKERS_WARNING:
         _notify(recording_id, 75, "Advertencia", f"{speaker_count} voces detectadas (reunión muy numerosa)")
@@ -116,10 +130,10 @@ def _execute_pipeline(recording_id: int, file_path: str):
         )
 
     _notify(recording_id, 80, "Diarización completa", f"{speaker_count} hablantes detectados")
-
     _notify(recording_id, 85, "Fusionando resultados", "Combinando transcripción y diarización...")
 
     merged = merge(transcript_segments, diarization_segments)
+    log.info("[%d] Merge done: %d merged segments", recording_id, len(merged))
 
     _notify(recording_id, 90, "Generando huellas vocales", "Calculando embeddings por hablante...")
 
@@ -128,9 +142,7 @@ def _execute_pipeline(recording_id: int, file_path: str):
 
     for d_seg in diarization_segments:
         spk = d_seg["speaker"]
-        start = d_seg["start"]
-        end = d_seg["end"]
-        speaker_time[spk] = speaker_time.get(spk, 0.0) + (end - start)
+        speaker_time[spk] = speaker_time.get(spk, 0.0) + (d_seg["end"] - d_seg["start"])
 
     for spk in unique_speakers:
         best_seg = max(
@@ -142,8 +154,9 @@ def _execute_pipeline(recording_id: int, file_path: str):
             try:
                 emb = get_embedding(wav_path, best_seg["start"], best_seg["end"])
                 speaker_embeddings[spk].append(emb)
+                log.info("[%d] Embedding OK for %s", recording_id, spk)
             except Exception:
-                pass
+                log.warning("[%d] Embedding failed for %s:\n%s", recording_id, spk, traceback.format_exc())
 
     _notify(recording_id, 95, "Comparando con base de datos", "Buscando perfiles conocidos...")
 
@@ -156,7 +169,6 @@ def _execute_pipeline(recording_id: int, file_path: str):
 
         from app.core.embedder import average_embeddings
         avg_emb = average_embeddings(embs) if len(embs) > 1 else embs[0]
-
         matched_speaker, score = find_matching_speaker(avg_emb)
 
         sample_name = f"rec{recording_id}_{spk}.wav"
@@ -170,7 +182,7 @@ def _execute_pipeline(recording_id: int, file_path: str):
             try:
                 sample_path = extract_sample(wav_path, best_seg["start"], best_seg["end"], sample_name)
             except Exception:
-                pass
+                log.warning("[%d] Sample extraction failed for %s", recording_id, spk)
 
         with get_db() as conn:
             existing = conn.execute(
@@ -215,6 +227,7 @@ def _execute_pipeline(recording_id: int, file_path: str):
         "language": language_display,
     }
 
+    log.info("[%d] Pipeline completed successfully", recording_id)
     _notify(recording_id, 100, "Listo para identificación", "Pipeline completado")
 
 
