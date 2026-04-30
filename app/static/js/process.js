@@ -23,23 +23,27 @@ const Process = (() => {
 
   function start(recordingId, filename, onDone, onError) {
     document.getElementById('processing-filename').textContent = filename;
-    setStage(5, 'Iniciando...', '');
+    setStage(5, 'Iniciando...', 'Cargando modelos de IA (puede tardar varios minutos la primera vez)...');
 
     API.startProcess(recordingId).catch(err => onError(err.message));
 
     const es = API.progressStream(recordingId);
 
     es.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+      // Ignore SSE comment lines (keepalives start with ':' but EventSource
+      // only fires onmessage for 'data:' lines, so this is just a safety check)
+      if (!event.data || event.data.trim() === '') return;
+
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return; // ignore malformed lines
+      }
 
       if (data.percent === -1) {
         es.close();
         onError(data.detail || 'Error desconocido durante el procesamiento.');
-        return;
-      }
-      if (data.percent === -2) {
-        es.close();
-        onError('Tiempo de espera agotado.');
         return;
       }
 
@@ -52,8 +56,14 @@ const Process = (() => {
     };
 
     es.onerror = () => {
+      // Don't treat a dropped SSE connection as a fatal error — the pipeline
+      // may still be running. Reconnect silently after a short delay.
       es.close();
-      onError('Se perdió la conexión con el servidor.');
+      setTimeout(() => {
+        const es2 = API.progressStream(recordingId);
+        es2.onmessage = es.onmessage;
+        es2.onerror = () => es2.close();
+      }, 2000);
     };
   }
 
