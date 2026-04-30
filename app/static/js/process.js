@@ -14,6 +14,9 @@ const Process = (() => {
     'Advertencia':               '⚠️',
   };
 
+  let _timerInterval = null;
+  let _startTime = null;
+
   function getIcon(stage) {
     for (const [key, icon] of Object.entries(STAGE_ICONS)) {
       if (stage.includes(key)) return icon;
@@ -21,28 +24,60 @@ const Process = (() => {
     return '⚙️';
   }
 
+  function fmtElapsed(ms) {
+    const totalSec = Math.floor(ms / 1000);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) return `${h}h ${m.toString().padStart(2,'0')}m ${s.toString().padStart(2,'0')}s`;
+    if (m > 0) return `${m}m ${s.toString().padStart(2,'0')}s`;
+    return `${s}s`;
+  }
+
+  function startTimer() {
+    stopTimer();
+    _startTime = Date.now();
+    const el = document.getElementById('elapsed-time');
+    if (el) el.textContent = '0s';
+    _timerInterval = setInterval(() => {
+      if (!_startTime) return;
+      const el = document.getElementById('elapsed-time');
+      if (el) el.textContent = fmtElapsed(Date.now() - _startTime);
+    }, 1000);
+  }
+
+  function stopTimer() {
+    if (_timerInterval) {
+      clearInterval(_timerInterval);
+      _timerInterval = null;
+    }
+  }
+
   function start(recordingId, filename, onDone, onError) {
     document.getElementById('processing-filename').textContent = filename;
     setStage(5, 'Iniciando...', 'Cargando modelos de IA (puede tardar varios minutos la primera vez)...');
+    startTimer();
 
-    API.startProcess(recordingId).catch(err => onError(err.message, recordingId));
+    API.startProcess(recordingId).catch(err => {
+      stopTimer();
+      onError(err.message, recordingId);
+    });
 
     const es = API.progressStream(recordingId);
 
     es.onmessage = (event) => {
-      // Ignore SSE comment lines (keepalives start with ':' but EventSource
-      // only fires onmessage for 'data:' lines, so this is just a safety check)
       if (!event.data || event.data.trim() === '') return;
 
       let data;
       try {
         data = JSON.parse(event.data);
       } catch {
-        return; // ignore malformed lines
+        return;
       }
 
       if (data.percent === -1) {
         es.close();
+        stopTimer();
         onError(data.detail || 'Error desconocido durante el procesamiento.', recordingId);
         return;
       }
@@ -51,13 +86,12 @@ const Process = (() => {
 
       if (data.percent === 100) {
         es.close();
+        stopTimer();
         setTimeout(() => onDone(recordingId), 600);
       }
     };
 
     es.onerror = () => {
-      // Don't treat a dropped SSE connection as a fatal error — the pipeline
-      // may still be running. Reconnect silently after a short delay.
       es.close();
       setTimeout(() => {
         const es2 = API.progressStream(recordingId);

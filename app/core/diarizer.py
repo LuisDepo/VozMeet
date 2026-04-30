@@ -40,10 +40,13 @@ def diarize(audio_path: str | Path) -> list[dict]:
     pipe = _get_pipeline()
     audio_path = str(audio_path)
 
-    diarization = pipe(audio_path)
+    result = pipe(audio_path)
+
+    # pyannote >= 3.3 wraps output in DiarizeOutput; older versions return Annotation directly
+    annotation = getattr(result, 'diarization', result)
 
     segments = []
-    for turn, _, speaker in diarization.itertracks(yield_label=True):
+    for turn, _, speaker in annotation.itertracks(yield_label=True):
         segments.append({
             "speaker": speaker,
             "start": round(turn.start, 3),

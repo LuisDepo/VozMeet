@@ -9,9 +9,7 @@ router = APIRouter()
 
 _sse_queues: dict[int, asyncio.Queue] = {}
 
-# Models can take several minutes to load on first run
-_SSE_TIMEOUT = 600.0      # 10 minutes max total wait
-_HEARTBEAT_INTERVAL = 15.0  # send keepalive every 15s so connection stays open
+_HEARTBEAT_INTERVAL = 20.0  # send keepalive every 20s so connection stays open
 
 
 @router.post("/process/{recording_id}")
@@ -50,27 +48,15 @@ async def progress_stream(recording_id: int):
             queue = asyncio.Queue()
             _sse_queues[recording_id] = queue
 
-        deadline = asyncio.get_event_loop().time() + _SSE_TIMEOUT
-
+        # No absolute deadline — recordings can be 4-5 hours long.
+        # Only keepalives prevent the connection from dropping.
         while True:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                yield f"data: {json.dumps({'percent': -1, 'stage': 'error', 'detail': 'Tiempo máximo de procesamiento agotado (10 min)'})}\n\n"
-                break
-
             try:
-                data = await asyncio.wait_for(
-                    queue.get(),
-                    timeout=min(_HEARTBEAT_INTERVAL, remaining)
-                )
+                data = await asyncio.wait_for(queue.get(), timeout=_HEARTBEAT_INTERVAL)
                 yield f"data: {json.dumps(data)}\n\n"
-
                 if data.get("percent") == 100 or data.get("percent") == -1:
                     break
-
             except asyncio.TimeoutError:
-                # Send keepalive comment so the connection stays open
-                # The frontend ignores lines starting with ':'
                 yield ": keepalive\n\n"
 
     return StreamingResponse(
