@@ -50,7 +50,7 @@ class VozMeetApi:
         return {"ok": True}
 
     def get_version(self) -> str:
-        return "1.2"
+        return "1.3"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

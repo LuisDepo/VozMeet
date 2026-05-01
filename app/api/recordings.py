@@ -238,45 +238,57 @@ def resume_recording(recording_id: int):
 
 @router.get("/recordings/{recording_id}/transcript")
 def get_transcript(recording_id: int):
-    with get_db() as conn:
-        rec = conn.execute(
-            "SELECT * FROM recordings WHERE id=?", (recording_id,)
-        ).fetchone()
-        if not rec:
-            raise HTTPException(status_code=404, detail="Grabación no encontrada.")
+    try:
+        with get_db() as conn:
+            rec = conn.execute(
+                "SELECT * FROM recordings WHERE id=?", (recording_id,)
+            ).fetchone()
+            if not rec:
+                raise HTTPException(status_code=404, detail="Grabación no encontrada.")
 
-        segs = conn.execute(
-            "SELECT s.start_time, s.end_time, s.text, s.confidence, "
-            "sp.display_name, s.raw_speaker_label "
-            "FROM segments s "
-            "LEFT JOIN speakers sp ON s.speaker_id = sp.id "
-            "WHERE s.recording_id=? ORDER BY s.start_time",
-            (recording_id,),
-        ).fetchall()
+            segs = conn.execute(
+                "SELECT s.start_time, s.end_time, s.text, s.confidence, "
+                "sp.display_name, s.raw_speaker_label "
+                "FROM segments s "
+                "LEFT JOIN speakers sp ON s.speaker_id = sp.id "
+                "WHERE s.recording_id=? ORDER BY s.start_time",
+                (recording_id,),
+            ).fetchall()
 
-        participants_rows = conn.execute(
-            "SELECT DISTINCT sp.display_name FROM segments s "
-            "JOIN speakers sp ON s.speaker_id = sp.id "
-            "WHERE s.recording_id=?",
-            (recording_id,),
-        ).fetchall()
+            participants_rows = conn.execute(
+                "SELECT DISTINCT COALESCE(sp.display_name, s.raw_speaker_label) as name "
+                "FROM segments s "
+                "LEFT JOIN speakers sp ON s.speaker_id = sp.id "
+                "WHERE s.recording_id=?",
+                (recording_id,),
+            ).fetchall()
 
-    participants = [r["display_name"] for r in participants_rows if r["display_name"]]
+        participants = [r["name"] for r in participants_rows if r["name"]]
 
-    return {
-        "recording": dict(rec),
-        "participants": participants,
-        "segments": [
-            {
-                "start": seg["start_time"],
-                "end": seg["end_time"],
-                "text": seg["text"],
-                "speaker": seg["display_name"] or seg["raw_speaker_label"] or "Sin identificar",
-                "confidence": seg["confidence"],
-            }
-            for seg in segs
-        ],
-    }
+        rec_dict = dict(rec)
+        rec_dict.setdefault("total_processing_seconds", 0)
+        rec_dict.setdefault("last_started_at", None)
+        rec_dict.setdefault("pipeline_stage", None)
+
+        return {
+            "recording": rec_dict,
+            "participants": participants,
+            "segments": [
+                {
+                    "start": seg["start_time"],
+                    "end": seg["end_time"],
+                    "text": seg["text"] or "",
+                    "speaker": seg["display_name"] or seg["raw_speaker_label"] or "Sin identificar",
+                    "confidence": seg["confidence"],
+                }
+                for seg in segs
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("[%d] Error loading transcript", recording_id)
+        raise HTTPException(status_code=500, detail=f"Error al cargar transcripción: {e}") from e
 
 
 @router.get("/recordings/{recording_id}/error")
@@ -298,6 +310,22 @@ def delete_recording(recording_id: int):
         ).fetchone()
         if not rec:
             raise HTTPException(status_code=404, detail="Grabación no encontrada.")
+
+        # Delete generated WAV file
+        if rec["processed_path"]:
+            try:
+                Path(rec["processed_path"]).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        # Delete voice sample clips for this recording
+        try:
+            from app.config import VOICE_SAMPLES_DIR
+            for f in VOICE_SAMPLES_DIR.glob(f"rec{recording_id}_*.wav"):
+                f.unlink(missing_ok=True)
+        except Exception:
+            pass
+
         conn.execute("DELETE FROM segments WHERE recording_id=?", (recording_id,))
         conn.execute("DELETE FROM recording_speakers WHERE recording_id=?", (recording_id,))
         conn.execute("DELETE FROM recordings WHERE id=?", (recording_id,))

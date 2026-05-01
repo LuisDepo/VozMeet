@@ -7,7 +7,8 @@ from app.api import upload, process, speakers, recordings, export, logs, update
 from app.config import VOICE_SAMPLES_DIR
 from app.database.db import get_db
 
-app = FastAPI(title="VozMeet", version="1.2.0")
+APP_VERSION = "1.3"
+app = FastAPI(title="VozMeet", version="1.3.0")
 
 init_db()
 
@@ -23,6 +24,11 @@ app.include_router(update.router, prefix="/api")
 @app.get("/api/health")
 def health():
     return {"status": "ok", "app": "VozMeet"}
+
+
+@app.get("/api/version")
+def version():
+    return {"version": APP_VERSION}
 
 
 @app.get("/api/audio/sample/{filename}")

@@ -122,52 +122,46 @@ def _execute_pipeline(recording_id: int, file_path: str):
     if duration < MIN_AUDIO_DURATION_SECONDS:
         _notify(recording_id, 9, "Advertencia", f"Audio corto ({duration:.1f}s). Procesando igualmente.")
 
-    # ── Stage 2: Transcription ────────────────────────────────────────────────
+    # ── Stages 2+3: Transcription AND Diarization in parallel ────────────────
+    import concurrent.futures
+
     whisper_hint = (
-        "Transcribiendo audio..." if whisper_is_loaded()
-        else "Cargando modelo Whisper en memoria (30-60s)..."
+        "Transcribiendo y separando voces en paralelo..." if whisper_is_loaded()
+        else "Cargando Whisper (30-60s) · separando voces en paralelo..."
     )
-    _notify(recording_id, 10, "Iniciando transcripción", whisper_hint)
-    log.info("[%d] Starting transcription", recording_id)
+    _notify(recording_id, 10, "Procesando audio", whisper_hint)
+    log.info("[%d] Starting transcription + diarization in parallel", recording_id)
 
     def _transcription_progress(frac: float):
-        # Maps 0-1 → 10%-52% on overall bar
-        pct = 10 + int(frac * 42)
+        pct = 10 + int(frac * 55)  # 10% → 65%
         _notify(recording_id, pct, "Transcribiendo",
-                f"{int(frac * 100)}% del audio · {_fmt_duration(frac * duration)} / {_fmt_duration(duration)}")
+                f"{int(frac * 100)}% · {_fmt_duration(frac * duration)} / {_fmt_duration(duration)}")
 
-    transcript_result = transcribe(wav_path, progress_cb=_transcription_progress)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        future_transcript = executor.submit(transcribe, wav_path, None, _transcription_progress)
+        future_diarize = executor.submit(diarize, wav_path)
+        transcript_result = future_transcript.result()
+        diarization_segments = future_diarize.result()
+
     transcript_segments = transcript_result["segments"]
     language = transcript_result["language"]
     language_display = transcript_result["language_display"]
     log.info("[%d] Transcription done: %d segments, lang=%s", recording_id, len(transcript_segments), language)
-
-    with get_db() as conn:
-        conn.execute(
-            "UPDATE recordings SET language_detected=?, pipeline_stage='transcribed' WHERE id=?",
-            (language_display, recording_id),
-        )
-    _notify(recording_id, 53, "Transcripción completa",
-            f"Idioma: {language_display} · {len(transcript_segments)} fragmentos")
-
-    # ── Stage 3: Diarization ─────────────────────────────────────────────────
-    _notify(recording_id, 55, "Iniciando diarización", "Separando hablantes con pyannote (puede tardar)...")
-    log.info("[%d] Starting diarization", recording_id)
-    diarization_segments = diarize(wav_path)
 
     unique_speakers = list({s["speaker"] for s in diarization_segments})
     speaker_count = len(unique_speakers)
     log.info("[%d] Diarization done: %d speakers", recording_id, speaker_count)
 
     if speaker_count > MAX_SPEAKERS_WARNING:
-        _notify(recording_id, 73, "Advertencia", f"{speaker_count} voces detectadas")
+        _notify(recording_id, 66, "Advertencia", f"{speaker_count} voces detectadas — puede tardar más")
 
     with get_db() as conn:
         conn.execute(
-            "UPDATE recordings SET speaker_count=?, pipeline_stage='diarized' WHERE id=?",
-            (speaker_count, recording_id),
+            "UPDATE recordings SET language_detected=?, speaker_count=?, pipeline_stage='diarized' WHERE id=?",
+            (language_display, speaker_count, recording_id),
         )
-    _notify(recording_id, 75, "Diarización completa", f"{speaker_count} hablantes detectados")
+    _notify(recording_id, 68, "Transcripción y diarización completas",
+            f"Idioma: {language_display} · {len(transcript_segments)} fragmentos · {speaker_count} voces")
 
     # ── Stage 4: Merge ───────────────────────────────────────────────────────
     _notify(recording_id, 78, "Fusionando resultados", "Combinando transcripción y diarización...")

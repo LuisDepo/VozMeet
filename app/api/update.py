@@ -33,8 +33,13 @@ def check_update():
             "update_available": remote_version != CURRENT_VERSION,
         }
     except Exception as e:
-        log.warning("Update check failed: %s", e)
-        return {"current_version": CURRENT_VERSION, "remote_version": None, "error": str(e)}
+        log.warning("Update check failed (repo privado o sin red): %s", e)
+        # Private repo or no network — assume up to date rather than showing error
+        return {
+            "current_version": CURRENT_VERSION,
+            "remote_version": CURRENT_VERSION,
+            "update_available": False,
+        }
 
 
 @router.post("/update/install")

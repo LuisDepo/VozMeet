@@ -66,6 +66,37 @@
   font-weight: 500;
 }
 
+/* Brand logo — swap /img/brand-logo.png to update */
+.brand-logo {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  margin-left: 12px;
+}
+.brand-logo img {
+  height: calc(var(--toolbar-height, 48px) * 0.40);
+  max-height: 22px;
+  width: auto;
+  object-fit: contain;
+  opacity: 0.85;
+}
+
+/* ─── History section headers ─────────────────────── */
+.history-section-header {
+  padding: 10px 16px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--apple-green);
+  border-bottom: 1px solid var(--separator);
+  margin-top: 4px;
+}
+.history-section-header--pending {
+  color: var(--text-tertiary);
+  margin-top: 12px;
+}
+
 /* ─── View: Upload ────────────────────────────────── */
 #view-upload {
   display: flex;

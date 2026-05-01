@@ -39,6 +39,8 @@ def transcribe(
         word_timestamps=False,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500},
+        condition_on_previous_text=False,
+        temperature=0,
     )
 
     total_duration = info.duration or 1.0

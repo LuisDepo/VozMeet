@@ -73,62 +73,99 @@ async function loadHistory() {
       return;
     }
 
+    const done = recordings.filter(r => r.status === 'done');
+    const pending = recordings.filter(r => r.status !== 'done');
+
     container.innerHTML = '';
-    recordings.forEach(rec => {
-      const row = document.createElement('div');
-      row.className = 'recording-row';
 
-      const statusBadge = {
-        done:        '<span class="badge badge-green">Listo</span>',
-        processing:  '<span class="badge badge-blue">Procesando</span>',
-        error:       '<span class="badge badge-red">Error</span>',
-        identifying: '<span class="badge badge-orange">Pendiente</span>',
-        uploaded:    '<span class="badge badge-gray">Subido</span>',
-        interrupted: '<span class="badge badge-orange">Proceso detenido</span>',
-      }[rec.status] || `<span class="badge badge-gray">${rec.status}</span>`;
+    if (done.length) {
+      const hdr = document.createElement('div');
+      hdr.className = 'history-section-header';
+      hdr.textContent = `Completadas (${done.length})`;
+      container.appendChild(hdr);
+      done.forEach(rec => container.appendChild(buildHistoryRow(rec)));
+    }
 
-      const dur = rec.duration_seconds ? fmtDurationShort(rec.duration_seconds) : '—';
-      const date = rec.created_at ? new Date(rec.created_at).toLocaleDateString('es-ES') : '—';
-      const spks = rec.speaker_count ? `${rec.speaker_count} voces` : '';
-
-      // Processing time info
-      const totalSec = rec.total_processing_seconds || 0;
-      const timeInfo = totalSec >= 60 ? ` · ⏱ ${fmtDurationShort(totalSec)} proc.` : '';
-
-      // Time since last resume
-      let lastResumeInfo = '';
-      if (rec.last_started_at && (rec.status === 'processing' || rec.status === 'interrupted')) {
-        const lastStart = new Date(rec.last_started_at + 'Z');
-        const diffMin = Math.round((Date.now() - lastStart.getTime()) / 60000);
-        if (diffMin < 60) lastResumeInfo = ` · última sesión: hace ${diffMin}m`;
-        else lastResumeInfo = ` · última sesión: hace ${Math.round(diffMin / 60)}h`;
-      }
-
-      row.innerHTML = `
-        <div class="recording-icon">🎙️</div>
-        <div class="recording-info">
-          <div class="recording-name">${escHtml(rec.filename)}</div>
-          <div class="recording-meta">${date} · ${dur}${spks ? ' · ' + spks : ''} · ${rec.language_detected || ''}${timeInfo}${lastResumeInfo}</div>
-        </div>
-        <div style="display:flex;align-items:center;gap:10px">
-          ${statusBadge}
-        </div>
-        <div class="recording-actions">
-          ${rec.status === 'done' || rec.status === 'identifying'
-            ? `<button class="btn btn-sm btn-primary" onclick="openRecording(${rec.id}, '${rec.status}')" aria-label="Ver transcripción">Ver</button>`
-            : ''}
-          ${rec.status === 'error'
-            ? `<button class="btn btn-sm btn-secondary" onclick="showErrorDetail(${rec.id})" aria-label="Ver error">Ver error</button>`
-            : ''}
-          ${rec.status === 'interrupted'
-            ? `<button class="btn btn-sm btn-primary" onclick="resumeRecording(${rec.id}, '${escHtml(rec.filename)}')" aria-label="Reanudar procesamiento">Reanudar</button>`
-            : ''}
-          <button class="btn btn-sm btn-danger" onclick="deleteRecording(${rec.id})" aria-label="Eliminar grabación">🗑</button>
-        </div>`;
-      container.appendChild(row);
-    });
+    if (pending.length) {
+      const hdr = document.createElement('div');
+      hdr.className = 'history-section-header history-section-header--pending';
+      hdr.textContent = `En proceso (${pending.length})`;
+      container.appendChild(hdr);
+      pending.forEach(rec => container.appendChild(buildHistoryRow(rec)));
+    }
   } catch (err) {
     container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">❌</div><div>${escHtml(err.message)}</div></div>`;
+  }
+}
+
+function buildHistoryRow(rec) {
+  const row = document.createElement('div');
+  row.className = 'recording-row';
+
+  const statusBadge = {
+    done:        '<span class="badge badge-green">Listo</span>',
+    processing:  '<span class="badge badge-blue">Procesando</span>',
+    error:       '<span class="badge badge-red">Error</span>',
+    identifying: '<span class="badge badge-orange">Identificando</span>',
+    uploaded:    '<span class="badge badge-gray">Subido</span>',
+    interrupted: '<span class="badge badge-orange">Detenido</span>',
+  }[rec.status] || `<span class="badge badge-gray">${rec.status}</span>`;
+
+  const dur = rec.duration_seconds ? fmtDurationShort(rec.duration_seconds) : '—';
+  const date = rec.created_at ? new Date(rec.created_at).toLocaleDateString('es-ES') : '—';
+  const spks = rec.speaker_count ? `${rec.speaker_count} voces` : '';
+  const totalSec = rec.total_processing_seconds || 0;
+  const timeInfo = totalSec >= 60 ? ` · ⏱ ${fmtDurationShort(totalSec)} proc.` : '';
+
+  let lastResumeInfo = '';
+  if (rec.last_started_at && (rec.status === 'processing' || rec.status === 'interrupted')) {
+    const lastStart = new Date(rec.last_started_at + 'Z');
+    const diffMin = Math.round((Date.now() - lastStart.getTime()) / 60000);
+    lastResumeInfo = diffMin < 60
+      ? ` · hace ${diffMin}m`
+      : ` · hace ${Math.round(diffMin / 60)}h`;
+  }
+
+  const exportBtns = rec.status === 'done' ? `
+    <button class="btn btn-sm btn-secondary" onclick="exportFromHistory(${rec.id},'txt')" aria-label="Descargar TXT">TXT</button>
+    <button class="btn btn-sm btn-secondary" onclick="exportFromHistory(${rec.id},'md')" aria-label="Descargar MD">MD</button>` : '';
+
+  row.innerHTML = `
+    <div class="recording-icon">🎙️</div>
+    <div class="recording-info">
+      <div class="recording-name">${escHtml(rec.filename)}</div>
+      <div class="recording-meta">${date} · ${dur}${spks ? ' · ' + spks : ''}${rec.language_detected ? ' · ' + rec.language_detected : ''}${timeInfo}${lastResumeInfo}</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px">
+      ${statusBadge}
+    </div>
+    <div class="recording-actions">
+      ${rec.status === 'done' || rec.status === 'identifying'
+        ? `<button class="btn btn-sm btn-primary" onclick="openRecording(${rec.id}, '${rec.status}')" aria-label="Ver transcripción">Ver</button>`
+        : ''}
+      ${exportBtns}
+      ${rec.status === 'error'
+        ? `<button class="btn btn-sm btn-secondary" onclick="showErrorDetail(${rec.id})" aria-label="Ver error">Ver error</button>`
+        : ''}
+      ${rec.status === 'interrupted'
+        ? `<button class="btn btn-sm btn-primary" onclick="resumeRecording(${rec.id}, '${escHtml(rec.filename)}')" aria-label="Reanudar">Reanudar</button>`
+        : ''}
+      <button class="btn btn-sm btn-danger" onclick="deleteRecording(${rec.id})" aria-label="Eliminar">🗑</button>
+    </div>`;
+  return row;
+}
+
+async function exportFromHistory(recordingId, fmt) {
+  try {
+    if (window.pywebview && window.pywebview.api) {
+      const result = await window.pywebview.api.save_to_downloads(recordingId, fmt);
+      if (result.ok) showToast(`Guardado en Descargas: ${result.filename}`, 'success');
+      else showToast('Error al exportar: ' + result.error, 'error');
+    } else {
+      window.location.href = API.exportUrl(recordingId, fmt);
+    }
+  } catch (e) {
+    showToast('Error al exportar: ' + e.message, 'error');
   }
 }
 
@@ -279,7 +316,7 @@ async function checkForUpdate() {
       btn.disabled = false;
       btn.onclick = () => installUpdate();
     } else {
-      showToast(`VozMeet v${data.current_version} está al día.`, 'success');
+      showToast(`✅ VozMeet v${data.current_version} está actualizada.`, 'success');
       btn.disabled = false;
       btn.textContent = '🔄 Actualizar VozMeet';
     }
@@ -380,6 +417,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // Update button
   const updateBtn = document.getElementById('update-btn');
   if (updateBtn) updateBtn.addEventListener('click', checkForUpdate);
+
+  // Load and display version
+  fetch('/api/version').then(r => r.json()).then(d => {
+    const el = document.getElementById('app-version');
+    if (el) el.textContent = `v${d.version}`;
+  }).catch(() => {});
 
   // Start on upload view
   showView('upload');
