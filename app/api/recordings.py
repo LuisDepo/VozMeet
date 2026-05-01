@@ -161,7 +161,6 @@ def _identify_speakers_impl(recording_id: int, payload: IdentifyPayload):
                 if existing:
                     speaker_id = existing.id
                 else:
-                    import numpy as np
                     dummy_emb = np.zeros(192, dtype=np.float32)
                     name_key = display_name.lower().replace(" ", "_")
                     speaker_id = save_speaker(name_key, display_name, dummy_emb)
