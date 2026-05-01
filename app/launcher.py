@@ -109,6 +109,10 @@ def _on_closing():
 
 
 def start_server():
+    import sys as _sys
+    _base = str(Path(__file__).parent.parent)
+    if _base not in _sys.path:
+        _sys.path.insert(0, _base)
     import uvicorn
     from app.main import app as fastapi_app
     uvicorn.run(fastapi_app, host="127.0.0.1", port=8765, log_level="warning")
@@ -125,8 +129,25 @@ def wait_for_server(timeout: int = 30) -> bool:
     return False
 
 
+def _free_port():
+    """Kill any process using port 8765 so we can bind fresh."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["lsof", "-ti", "tcp:8765"],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            for pid in r.stdout.strip().split("\n"):
+                subprocess.run(["kill", "-9", pid.strip()], capture_output=True)
+            time.sleep(0.5)
+    except Exception:
+        pass
+
+
 def main():
     _configure_macos_app()
+    _free_port()
 
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
