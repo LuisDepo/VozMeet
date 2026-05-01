@@ -3,11 +3,11 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from app.database.db import init_db
-from app.api import upload, process, speakers, recordings, export, logs
+from app.api import upload, process, speakers, recordings, export, logs, update
 from app.config import VOICE_SAMPLES_DIR
 from app.database.db import get_db
 
-app = FastAPI(title="VozMeet", version="1.0.0")
+app = FastAPI(title="VozMeet", version="1.2.0")
 
 init_db()
 
@@ -17,6 +17,7 @@ app.include_router(speakers.router, prefix="/api")
 app.include_router(recordings.router, prefix="/api")
 app.include_router(export.router, prefix="/api")
 app.include_router(logs.router, prefix="/api")
+app.include_router(update.router, prefix="/api")
 
 
 @app.get("/api/health")

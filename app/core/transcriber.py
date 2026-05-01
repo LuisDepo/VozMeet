@@ -1,8 +1,12 @@
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 from app.config import WHISPER_MODEL, WHISPER_COMPUTE_TYPE, WHISPER_DEVICE
 
 _model = None
+
+
+def is_loaded() -> bool:
+    return _model is not None
 
 
 def _get_model():
@@ -20,7 +24,11 @@ def _get_model():
     return _model
 
 
-def transcribe(audio_path: str | Path, language: Optional[str] = None) -> dict:
+def transcribe(
+    audio_path: str | Path,
+    language: Optional[str] = None,
+    progress_cb: Optional[Callable[[float], None]] = None,
+) -> dict:
     model = _get_model()
     audio_path = str(audio_path)
 
@@ -33,6 +41,7 @@ def transcribe(audio_path: str | Path, language: Optional[str] = None) -> dict:
         vad_parameters={"min_silence_duration_ms": 500},
     )
 
+    total_duration = info.duration or 1.0
     segments = []
     for seg in segments_iter:
         segments.append({
@@ -41,6 +50,8 @@ def transcribe(audio_path: str | Path, language: Optional[str] = None) -> dict:
             "text": seg.text.strip(),
             "confidence": round(getattr(seg, "avg_logprob", 0.0), 4),
         })
+        if progress_cb:
+            progress_cb(min(seg.end / total_duration, 1.0))
 
     lang = info.language
     lang_display = _lang_display(lang)

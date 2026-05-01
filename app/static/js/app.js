@@ -79,11 +79,11 @@ async function loadHistory() {
       row.className = 'recording-row';
 
       const statusBadge = {
-        done: '<span class="badge badge-green">Listo</span>',
-        processing: '<span class="badge badge-blue">Procesando</span>',
-        error: '<span class="badge badge-red">Error</span>',
+        done:        '<span class="badge badge-green">Listo</span>',
+        processing:  '<span class="badge badge-blue">Procesando</span>',
+        error:       '<span class="badge badge-red">Error</span>',
         identifying: '<span class="badge badge-orange">Pendiente</span>',
-        uploaded: '<span class="badge badge-gray">Subido</span>',
+        uploaded:    '<span class="badge badge-gray">Subido</span>',
         interrupted: '<span class="badge badge-orange">Proceso detenido</span>',
       }[rec.status] || `<span class="badge badge-gray">${rec.status}</span>`;
 
@@ -91,11 +91,24 @@ async function loadHistory() {
       const date = rec.created_at ? new Date(rec.created_at).toLocaleDateString('es-ES') : '—';
       const spks = rec.speaker_count ? `${rec.speaker_count} voces` : '';
 
+      // Processing time info
+      const totalSec = rec.total_processing_seconds || 0;
+      const timeInfo = totalSec >= 60 ? ` · ⏱ ${fmtDurationShort(totalSec)} proc.` : '';
+
+      // Time since last resume
+      let lastResumeInfo = '';
+      if (rec.last_started_at && (rec.status === 'processing' || rec.status === 'interrupted')) {
+        const lastStart = new Date(rec.last_started_at + 'Z');
+        const diffMin = Math.round((Date.now() - lastStart.getTime()) / 60000);
+        if (diffMin < 60) lastResumeInfo = ` · última sesión: hace ${diffMin}m`;
+        else lastResumeInfo = ` · última sesión: hace ${Math.round(diffMin / 60)}h`;
+      }
+
       row.innerHTML = `
         <div class="recording-icon">🎙️</div>
         <div class="recording-info">
           <div class="recording-name">${escHtml(rec.filename)}</div>
-          <div class="recording-meta">${date} · ${dur}${spks ? ' · ' + spks : ''} · ${rec.language_detected || ''}</div>
+          <div class="recording-meta">${date} · ${dur}${spks ? ' · ' + spks : ''} · ${rec.language_detected || ''}${timeInfo}${lastResumeInfo}</div>
         </div>
         <div style="display:flex;align-items:center;gap:10px">
           ${statusBadge}
@@ -134,7 +147,20 @@ async function openRecording(id, status) {
 
 async function resumeRecording(id, filename) {
   try {
-    await fetch(`/api/recordings/${id}/resume`, { method: 'POST' });
+    const resp = await fetch(`/api/recordings/${id}/resume`, { method: 'POST' });
+    const data = await resp.json();
+
+    // Pipeline already finished — go straight to identify screen
+    if (data.status === 'identifying') {
+      showView('identify');
+      await Identify.load(id, (finalId) => {
+        showView('transcript');
+        Transcript.load(finalId);
+      });
+      return;
+    }
+
+    // Otherwise restart the pipeline (WAV may already be cached)
     showView('processing');
     Process.start(id, filename,
       (recId) => {
@@ -235,6 +261,66 @@ async function deleteProfile(id) {
   }
 }
 
+// ─── Update ────────────────────────────────────────────────────────────────────
+async function checkForUpdate() {
+  const btn = document.getElementById('update-btn');
+  btn.disabled = true;
+  btn.textContent = '🔄 Verificando...';
+  try {
+    const data = await fetch('/api/update/check').then(r => r.json());
+    if (data.error) {
+      showToast('No se pudo verificar: ' + data.error, 'error');
+      btn.disabled = false;
+      btn.textContent = '🔄 Actualizar VozMeet';
+      return;
+    }
+    if (data.update_available) {
+      btn.textContent = `⬇ Instalar v${data.remote_version}`;
+      btn.disabled = false;
+      btn.onclick = () => installUpdate();
+    } else {
+      showToast(`VozMeet v${data.current_version} está al día.`, 'success');
+      btn.disabled = false;
+      btn.textContent = '🔄 Actualizar VozMeet';
+    }
+  } catch (e) {
+    showToast('Error al verificar actualización.', 'error');
+    btn.disabled = false;
+    btn.textContent = '🔄 Actualizar VozMeet';
+  }
+}
+
+async function installUpdate() {
+  const btn = document.getElementById('update-btn');
+  btn.disabled = true;
+  btn.textContent = '⬇ Descargando...';
+  try {
+    const data = await fetch('/api/update/install', { method: 'POST' }).then(r => r.json());
+    if (data.ok) {
+      btn.textContent = '✅ Actualizado — Reiniciar';
+      btn.disabled = false;
+      btn.onclick = async () => {
+        if (window.pywebview && window.pywebview.api) {
+          await window.pywebview.api.restart_app();
+        } else {
+          showToast('Reinicia la aplicación manualmente para aplicar los cambios.', 'info', 6000);
+        }
+      };
+      showToast('Actualización completada. Haz clic en "Reiniciar" para aplicar.', 'success', 8000);
+    } else {
+      showToast('Error al actualizar: ' + data.error, 'error');
+      btn.disabled = false;
+      btn.textContent = '🔄 Actualizar VozMeet';
+      btn.onclick = () => checkForUpdate();
+    }
+  } catch (e) {
+    showToast('Error de red al actualizar.', 'error');
+    btn.disabled = false;
+    btn.textContent = '🔄 Actualizar VozMeet';
+    btn.onclick = () => checkForUpdate();
+  }
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 function fmtDurationShort(sec) {
   const h = Math.floor(sec / 3600);
@@ -251,7 +337,7 @@ function escHtml(str) {
 // ─── Bootstrap ─────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   // Sidebar navigation
-  document.querySelectorAll('.sidebar-item').forEach(btn => {
+  document.querySelectorAll('.sidebar-item[data-view]').forEach(btn => {
     btn.addEventListener('click', () => {
       const view = btn.dataset.view;
       showView(view);
@@ -272,7 +358,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
       },
       (errMsg, recId) => {
-        // Show persistent error (duration=0 means no auto-dismiss)
         const t = showToast('❌ Error: ' + errMsg + ' — revisa el log para más detalles.', 'error', 0);
         t.style.cursor = 'pointer';
         t.style.maxWidth = '400px';
@@ -291,6 +376,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Transcript search / filter
   document.getElementById('transcript-search').addEventListener('input', () => Transcript.onSearch());
   document.getElementById('speaker-filter').addEventListener('change', () => Transcript.onFilter());
+
+  // Update button
+  const updateBtn = document.getElementById('update-btn');
+  if (updateBtn) updateBtn.addEventListener('click', checkForUpdate);
 
   // Start on upload view
   showView('upload');

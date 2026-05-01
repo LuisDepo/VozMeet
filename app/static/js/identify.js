@@ -35,7 +35,8 @@ const Identify = (() => {
       container.appendChild(card);
 
       const conf = spk.match_confidence || 0;
-      if (spk.speaker_id && conf >= 0.85) {
+      // Auto-confirm high-confidence matches that have a real name (not generic)
+      if (spk.speaker_id && spk.display_name && conf >= 0.85) {
         assignments[spk.raw_label] = {
           raw_label: spk.raw_label,
           speaker_id: spk.speaker_id,
@@ -62,7 +63,7 @@ const Identify = (() => {
     const initial = spk.display_name ? spk.display_name[0].toUpperCase() : (idx + 1).toString();
 
     let suggestionHTML = '';
-    if (spk.speaker_id && conf >= 0.75 && conf < 0.85) {
+    if (spk.speaker_id && spk.display_name && conf >= 0.75 && conf < 0.85) {
       suggestionHTML = `
         <div class="suggestion-box">
           <span>💡 ¿Es <strong>${escHtml(spk.display_name)}</strong>?</span>
@@ -99,6 +100,9 @@ const Identify = (() => {
               onkeydown="Identify.onKeyDown(event, '${spk.raw_label}')">
             <div class="identity-dropdown hidden" id="dropdown-${spk.raw_label}"></div>
           </div>
+          <button class="btn btn-sm btn-ghost" style="white-space:nowrap;color:var(--text-tertiary)"
+            onclick="Identify.skipSpeaker('${spk.raw_label}')"
+            aria-label="Dejar sin identificar">Sin ID</button>
         </div>
       </div>`;
 
@@ -159,13 +163,21 @@ const Identify = (() => {
     updateGenerateBtn();
   }
 
+  function skipSpeaker(rawLabel) {
+    // Mark as "Sin identificar" — will be saved with speaker_id=NULL
+    assignments[rawLabel] = { raw_label: rawLabel, speaker_id: null, display_name: null };
+    markConfirmed(rawLabel, 'Sin identificar');
+    updateGenerateBtn();
+  }
+
   function markConfirmed(rawLabel, displayName) {
     const area = document.getElementById(`identity-area-${rawLabel}`);
     if (!area) return;
+    const label = displayName || 'Sin identificar';
     area.innerHTML = `
       <div class="identity-confirmed">
-        <span>✅</span>
-        <span>${escHtml(displayName)}</span>
+        <span>${displayName ? '✅' : '⬜'}</span>
+        <span>${escHtml(label)}</span>
         <button class="btn btn-sm btn-ghost" onclick="Identify.clearAssignment('${rawLabel}')"
           aria-label="Cambiar nombre">Cambiar</button>
       </div>`;
@@ -176,7 +188,6 @@ const Identify = (() => {
     const spk = speakersData.find(s => s.raw_label === rawLabel);
     if (!spk) return;
     const idx = speakersData.indexOf(spk);
-    const colorIdx = idx % COLORS.length;
     const area = document.getElementById(`identity-area-${rawLabel}`);
     area.innerHTML = `
       <div class="identity-input-row">
@@ -190,6 +201,9 @@ const Identify = (() => {
             onkeydown="Identify.onKeyDown(event, '${rawLabel}')">
           <div class="identity-dropdown hidden" id="dropdown-${rawLabel}"></div>
         </div>
+        <button class="btn btn-sm btn-ghost" style="white-space:nowrap;color:var(--text-tertiary)"
+          onclick="Identify.skipSpeaker('${rawLabel}')"
+          aria-label="Dejar sin identificar">Sin ID</button>
       </div>`;
     updateGenerateBtn();
   }
@@ -229,10 +243,15 @@ const Identify = (() => {
     const total = speakersData.length;
     const confirmed = Object.keys(assignments).length;
     const btn = document.getElementById('generate-transcript-btn');
-    btn.disabled = confirmed < total;
-    btn.textContent = confirmed < total
-      ? `Identificar todas las voces (${confirmed}/${total})`
-      : 'Generar Transcripción →';
+    // Always enabled — partial identification is allowed
+    btn.disabled = false;
+    if (confirmed === 0) {
+      btn.textContent = 'Generar Transcripción →';
+    } else if (confirmed < total) {
+      btn.textContent = `Generar Transcripción (${confirmed}/${total} identificadas) →`;
+    } else {
+      btn.textContent = 'Generar Transcripción →';
+    }
   }
 
   async function generate() {
@@ -240,13 +259,17 @@ const Identify = (() => {
     btn.disabled = true;
     btn.textContent = 'Generando...';
     try {
-      const payload = { assignments: Object.values(assignments) };
+      // Include ALL speakers — unassigned ones will have display_name: null
+      const allAssignments = speakersData.map(spk =>
+        assignments[spk.raw_label] || { raw_label: spk.raw_label, speaker_id: null, display_name: null }
+      );
+      const payload = { assignments: allAssignments };
       await API.identifySpeakers(recordingId, payload);
       onDoneCb(recordingId);
     } catch (err) {
       showToast('Error al generar transcripción: ' + err.message, 'error');
       btn.disabled = false;
-      btn.textContent = 'Generar Transcripción →';
+      updateGenerateBtn();
     }
   }
 
@@ -255,5 +278,5 @@ const Identify = (() => {
     return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
-  return { load, onSearch, onKeyDown, clearAssignment, confirmSuggestion, togglePlay, generate };
+  return { load, onSearch, onKeyDown, clearAssignment, confirmSuggestion, skipSpeaker, togglePlay, generate };
 })();

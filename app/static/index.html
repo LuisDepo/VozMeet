@@ -31,16 +31,23 @@
 
   <div class="app-body">
     <!-- Sidebar -->
-    <nav class="app-sidebar" role="navigation" aria-label="Menú principal">
-      <button class="sidebar-item active" data-view="upload" aria-label="Nueva grabación">
-        <span class="icon" aria-hidden="true">➕</span> Nueva grabación
-      </button>
-      <button class="sidebar-item" data-view="history" aria-label="Historial">
-        <span class="icon" aria-hidden="true">📋</span> Historial
-      </button>
-      <button class="sidebar-item" data-view="profiles" aria-label="Perfiles de voz">
-        <span class="icon" aria-hidden="true">👥</span> Perfiles de voz
-      </button>
+    <nav class="app-sidebar" role="navigation" aria-label="Menú principal" style="display:flex;flex-direction:column;justify-content:space-between">
+      <div>
+        <button class="sidebar-item active" data-view="upload" aria-label="Nueva grabación">
+          <span class="icon" aria-hidden="true">➕</span> Nueva grabación
+        </button>
+        <button class="sidebar-item" data-view="history" aria-label="Historial">
+          <span class="icon" aria-hidden="true">📋</span> Historial
+        </button>
+        <button class="sidebar-item" data-view="profiles" aria-label="Perfiles de voz">
+          <span class="icon" aria-hidden="true">👥</span> Perfiles de voz
+        </button>
+      </div>
+      <div style="padding:12px 8px;border-top:1px solid var(--separator)">
+        <button class="sidebar-item" id="update-btn" style="font-size:12px;color:var(--text-tertiary)" aria-label="Actualizar VozMeet">
+          <span class="icon" aria-hidden="true">🔄</span> Actualizar VozMeet
+        </button>
+      </div>
     </nav>
 
     <!-- Main content -->

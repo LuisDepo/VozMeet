@@ -35,8 +35,22 @@ class VozMeetApi:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def restart_app(self) -> dict:
+        """Close the webview window so the user can relaunch the app."""
+        def _close():
+            time.sleep(0.6)
+            try:
+                import webview
+                for w in webview.windows:
+                    w.destroy()
+            except Exception:
+                import os, signal
+                os.kill(os.getpid(), signal.SIGTERM)
+        threading.Thread(target=_close, daemon=True).start()
+        return {"ok": True}
+
     def get_version(self) -> str:
-        return "1.1"
+        return "1.2"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

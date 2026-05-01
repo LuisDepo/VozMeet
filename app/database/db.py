@@ -28,7 +28,10 @@ CREATE TABLE IF NOT EXISTS recordings (
     status TEXT DEFAULT 'uploaded',
     error_message TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    completed_at TIMESTAMP
+    completed_at TIMESTAMP,
+    pipeline_stage TEXT DEFAULT NULL,
+    total_processing_seconds REAL DEFAULT 0,
+    last_started_at TIMESTAMP DEFAULT NULL
 );
 """
 
@@ -78,12 +81,27 @@ def get_db():
         conn.close()
 
 
+def _migrate(conn: sqlite3.Connection):
+    """Add columns that may not exist in older DBs."""
+    migrations = [
+        ("recordings", "pipeline_stage", "TEXT DEFAULT NULL"),
+        ("recordings", "total_processing_seconds", "REAL DEFAULT 0"),
+        ("recordings", "last_started_at", "TIMESTAMP DEFAULT NULL"),
+    ]
+    for table, col, definition in migrations:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
+        except Exception:
+            pass  # column already exists
+
+
 def init_db():
     with get_db() as conn:
         conn.execute(CREATE_SPEAKERS)
         conn.execute(CREATE_RECORDINGS)
         conn.execute(CREATE_SEGMENTS)
         conn.execute(CREATE_RECORDING_SPEAKERS)
+        _migrate(conn)
         # Any recording still "processing" was interrupted by a previous crash/quit
         conn.execute(
             "UPDATE recordings SET status='interrupted', "

@@ -1,4 +1,5 @@
 import numpy as np
+from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from app.database.db import get_db
@@ -19,7 +20,8 @@ def list_recordings():
     with get_db() as conn:
         rows = conn.execute(
             "SELECT id, filename, duration_seconds, language_detected, speaker_count, "
-            "status, created_at, completed_at FROM recordings ORDER BY id DESC"
+            "status, created_at, completed_at, total_processing_seconds, last_started_at "
+            "FROM recordings ORDER BY id DESC"
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -68,7 +70,8 @@ def get_recording_speakers(recording_id: int):
         else:
             with get_db() as conn:
                 segs = conn.execute(
-                    "SELECT start_time, end_time FROM segments WHERE recording_id = ? AND raw_speaker_label = ?",
+                    "SELECT start_time, end_time FROM segments "
+                    "WHERE recording_id = ? AND raw_speaker_label = ?",
                     (recording_id, raw_label),
                 ).fetchall()
             talk_time = sum(s["end_time"] - s["start_time"] for s in segs)
@@ -122,10 +125,20 @@ def _identify_speakers_impl(recording_id: int, payload: IdentifyPayload):
 
     for assignment in payload.assignments:
         raw_label = assignment.get("raw_label")
-        display_name = assignment.get("display_name", "").strip()
+        display_name = (assignment.get("display_name") or "").strip()
         speaker_id = assignment.get("speaker_id")
 
-        if not raw_label or not display_name:
+        if not raw_label:
+            continue
+
+        # No name provided — mark as confirmed but leave speaker_id NULL
+        if not display_name:
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE recording_speakers SET confirmed_by_user=1 "
+                    "WHERE recording_id=? AND raw_label=?",
+                    (recording_id, raw_label),
+                )
             continue
 
         embedding_list = None
@@ -167,30 +180,67 @@ def _identify_speakers_impl(recording_id: int, payload: IdentifyPayload):
 
         with get_db() as conn:
             conn.execute(
-                "UPDATE recording_speakers SET speaker_id = ?, confirmed_by_user = 1 "
-                "WHERE recording_id = ? AND raw_label = ?",
+                "UPDATE recording_speakers SET speaker_id=?, confirmed_by_user=1 "
+                "WHERE recording_id=? AND raw_label=?",
                 (speaker_id, recording_id, raw_label),
             )
             conn.execute(
-                "UPDATE segments SET speaker_id = ? "
-                "WHERE recording_id = ? AND raw_speaker_label = ?",
+                "UPDATE segments SET speaker_id=? "
+                "WHERE recording_id=? AND raw_speaker_label=?",
                 (speaker_id, recording_id, raw_label),
             )
 
     with get_db() as conn:
         conn.execute(
-            "UPDATE recordings SET status = 'done', completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE recordings SET status='done', completed_at=CURRENT_TIMESTAMP WHERE id=?",
             (recording_id,),
         )
 
     return {"ok": True, "recording_id": recording_id}
 
 
+@router.post("/recordings/{recording_id}/resume")
+def resume_recording(recording_id: int):
+    with get_db() as conn:
+        rec = conn.execute(
+            "SELECT * FROM recordings WHERE id=?", (recording_id,)
+        ).fetchone()
+        if not rec:
+            raise HTTPException(status_code=404, detail="Grabación no encontrada.")
+
+        # Already at identify stage — pipeline is done, just navigate there
+        if rec["status"] == "identifying":
+            return {"ok": True, "recording_id": recording_id, "status": "identifying"}
+
+        # Reset segments and speakers for a fresh pipeline run
+        conn.execute("DELETE FROM segments WHERE recording_id=?", (recording_id,))
+        conn.execute("DELETE FROM recording_speakers WHERE recording_id=?", (recording_id,))
+
+        # Keep the WAV file if it's already on disk (skips audio extraction on resume)
+        processed_path = rec["processed_path"]
+        wav_exists = processed_path and Path(processed_path).exists()
+
+        if wav_exists:
+            conn.execute(
+                "UPDATE recordings SET status='uploaded', error_message=NULL, "
+                "pipeline_stage=NULL WHERE id=?",
+                (recording_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE recordings SET status='uploaded', error_message=NULL, "
+                "processed_path=NULL, duration_seconds=NULL, pipeline_stage=NULL WHERE id=?",
+                (recording_id,),
+            )
+
+    return {"ok": True, "recording_id": recording_id, "status": "uploaded"}
+
+
 @router.get("/recordings/{recording_id}/transcript")
 def get_transcript(recording_id: int):
     with get_db() as conn:
         rec = conn.execute(
-            "SELECT * FROM recordings WHERE id = ?", (recording_id,)
+            "SELECT * FROM recordings WHERE id=?", (recording_id,)
         ).fetchone()
         if not rec:
             raise HTTPException(status_code=404, detail="Grabación no encontrada.")
@@ -200,14 +250,14 @@ def get_transcript(recording_id: int):
             "sp.display_name, s.raw_speaker_label "
             "FROM segments s "
             "LEFT JOIN speakers sp ON s.speaker_id = sp.id "
-            "WHERE s.recording_id = ? ORDER BY s.start_time",
+            "WHERE s.recording_id=? ORDER BY s.start_time",
             (recording_id,),
         ).fetchall()
 
         participants_rows = conn.execute(
             "SELECT DISTINCT sp.display_name FROM segments s "
             "JOIN speakers sp ON s.speaker_id = sp.id "
-            "WHERE s.recording_id = ?",
+            "WHERE s.recording_id=?",
             (recording_id,),
         ).fetchall()
 
@@ -221,7 +271,7 @@ def get_transcript(recording_id: int):
                 "start": seg["start_time"],
                 "end": seg["end_time"],
                 "text": seg["text"],
-                "speaker": seg["display_name"] or seg["raw_speaker_label"] or "Desconocido",
+                "speaker": seg["display_name"] or seg["raw_speaker_label"] or "Sin identificar",
                 "confidence": seg["confidence"],
             }
             for seg in segs
@@ -229,34 +279,26 @@ def get_transcript(recording_id: int):
     }
 
 
-@router.post("/recordings/{recording_id}/resume")
-def resume_recording(recording_id: int):
+@router.get("/recordings/{recording_id}/error")
+def get_recording_error(recording_id: int):
     with get_db() as conn:
-        rec = conn.execute(
-            "SELECT * FROM recordings WHERE id = ?", (recording_id,)
+        row = conn.execute(
+            "SELECT error_message FROM recordings WHERE id=?", (recording_id,)
         ).fetchone()
-        if not rec:
-            raise HTTPException(status_code=404, detail="Grabación no encontrada.")
-        conn.execute("DELETE FROM segments WHERE recording_id = ?", (recording_id,))
-        conn.execute("DELETE FROM recording_speakers WHERE recording_id = ?", (recording_id,))
-        conn.execute(
-            "UPDATE recordings SET status='uploaded', error_message=NULL, "
-            "processed_path=NULL, duration_seconds=NULL, language_detected=NULL, "
-            "speaker_count=NULL, completed_at=NULL WHERE id = ?",
-            (recording_id,),
-        )
-    return {"ok": True, "recording_id": recording_id}
+    if not row:
+        raise HTTPException(status_code=404, detail="Grabación no encontrada.")
+    return {"error": row["error_message"] or "Sin detalles de error."}
 
 
 @router.delete("/recordings/{recording_id}")
 def delete_recording(recording_id: int):
     with get_db() as conn:
         rec = conn.execute(
-            "SELECT * FROM recordings WHERE id = ?", (recording_id,)
+            "SELECT * FROM recordings WHERE id=?", (recording_id,)
         ).fetchone()
         if not rec:
             raise HTTPException(status_code=404, detail="Grabación no encontrada.")
-        conn.execute("DELETE FROM segments WHERE recording_id = ?", (recording_id,))
-        conn.execute("DELETE FROM recording_speakers WHERE recording_id = ?", (recording_id,))
-        conn.execute("DELETE FROM recordings WHERE id = ?", (recording_id,))
+        conn.execute("DELETE FROM segments WHERE recording_id=?", (recording_id,))
+        conn.execute("DELETE FROM recording_speakers WHERE recording_id=?", (recording_id,))
+        conn.execute("DELETE FROM recordings WHERE id=?", (recording_id,))
     return {"ok": True}
