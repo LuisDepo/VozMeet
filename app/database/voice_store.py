@@ -63,12 +63,17 @@ def save_speaker(
 ) -> int:
     blob = _serialize(embedding)
     with get_db() as conn:
-        cur = conn.execute(
-            "INSERT INTO speakers (name, display_name, embedding, sample_audio_path) "
+        # INSERT OR IGNORE so duplicate names never raise UNIQUE constraint errors.
+        # If the name already exists the INSERT is skipped and we return the existing id.
+        conn.execute(
+            "INSERT OR IGNORE INTO speakers (name, display_name, embedding, sample_audio_path) "
             "VALUES (?, ?, ?, ?)",
             (name, display_name, blob, sample_path),
         )
-        return cur.lastrowid
+        row = conn.execute(
+            "SELECT id FROM speakers WHERE name = ?", (name,)
+        ).fetchone()
+        return row["id"]
 
 
 def update_speaker_embedding(speaker_id: int, new_embedding: np.ndarray):

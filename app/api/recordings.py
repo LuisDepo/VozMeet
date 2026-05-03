@@ -152,31 +152,33 @@ def _identify_speakers_impl(recording_id: int, payload: IdentifyPayload):
             if embedding_list is not None:
                 update_speaker_embedding(speaker_id, embedding_list)
         else:
-            if embedding_list is not None:
+            name_key = display_name.lower().replace(" ", "_")
+            # Always check by name first — prevents UNIQUE constraint errors when
+            # the same display name (e.g. "No inteligible") appears across recordings.
+            with get_db() as conn:
+                existing_by_name = conn.execute(
+                    "SELECT id FROM speakers WHERE name = ?", (name_key,)
+                ).fetchone()
+
+            if existing_by_name:
+                speaker_id = existing_by_name["id"]
+                if embedding_list is not None:
+                    update_speaker_embedding(speaker_id, embedding_list)
+            elif embedding_list is not None:
                 matched, score = find_matching_speaker(embedding_list)
                 from app.config import SIMILARITY_THRESHOLD
                 if matched and score >= SIMILARITY_THRESHOLD:
                     speaker_id = matched.id
                     update_speaker_embedding(speaker_id, embedding_list)
                 else:
-                    name_key = display_name.lower().replace(" ", "_")
                     sample_path = None
                     if pipeline_result:
                         sugg = pipeline_result.get("suggestions", {}).get(raw_label, {})
                         sample_path = sugg.get("sample_path")
                     speaker_id = save_speaker(name_key, display_name, embedding_list, sample_path)
             else:
-                from app.database.voice_store import get_all_speakers
-                existing = next(
-                    (s for s in get_all_speakers() if s.display_name.lower() == display_name.lower()),
-                    None,
-                )
-                if existing:
-                    speaker_id = existing.id
-                else:
-                    dummy_emb = np.zeros(192, dtype=np.float32)
-                    name_key = display_name.lower().replace(" ", "_")
-                    speaker_id = save_speaker(name_key, display_name, dummy_emb)
+                dummy_emb = np.zeros(192, dtype=np.float32)
+                speaker_id = save_speaker(name_key, display_name, dummy_emb)
 
         with get_db() as conn:
             conn.execute(
