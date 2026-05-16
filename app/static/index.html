@@ -28,8 +28,9 @@
       </svg>
       100% local — tus grabaciones nunca salen de este Mac
     </div>
-    <div class="brand-logo" role="img" aria-label="Logo de empresa">
-      <img src="/img/brand-logo.png" alt="" onerror="this.style.display='none'">
+    <div class="brand-logo" role="img" aria-label="by BMS" style="display:flex;align-items:center;gap:6px;color:var(--text-tertiary);font-size:12px">
+      <span style="opacity:0.5">by</span>
+      <img src="/img/cat-logo.svg" alt="BMS" width="28" height="28" style="opacity:0.7;display:block" onerror="this.style.display='none'">
     </div>
   </header>
 
@@ -136,12 +137,29 @@
           <div class="export-btns">
             <button class="btn btn-secondary btn-sm" id="export-txt-btn" aria-label="Exportar como texto plano">TXT</button>
             <button class="btn btn-secondary btn-sm" id="export-md-btn" aria-label="Exportar como Markdown">MD</button>
+            <button class="btn btn-secondary btn-sm" id="export-docx-btn" aria-label="Exportar como Word">Word</button>
             <button class="btn btn-secondary btn-sm" id="export-json-btn" aria-label="Exportar como JSON">JSON</button>
+            <button class="btn btn-secondary btn-sm" id="summary-btn" aria-label="Generar resumen de reunión" title="Generar resumen con IA local">✦ Resumen</button>
           </div>
         </div>
         <div class="card">
           <div id="segments-container" class="card-body" style="padding:8px" role="list" aria-label="Segmentos de la transcripción"></div>
         </div>
+        <!-- Meeting summary panel -->
+        <div id="summary-panel" class="hidden" style="margin-top:16px">
+          <div class="card" style="padding:20px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+              <h3 style="margin:0;font-size:16px;font-weight:600">✦ Resumen de la reunión</h3>
+              <button id="summary-close-btn" style="background:none;border:none;cursor:pointer;font-size:18px;color:var(--text-tertiary)" aria-label="Cerrar resumen">✕</button>
+            </div>
+            <div id="summary-loading" class="hidden" style="text-align:center;padding:24px;color:var(--text-secondary)">
+              <div style="font-size:24px;margin-bottom:8px">⟳</div>
+              <div>Generando resumen con IA local…<br><small>Puede tardar 30-60 segundos la primera vez</small></div>
+            </div>
+            <div id="summary-content" style="white-space:pre-wrap;font-size:14px;line-height:1.6;color:var(--text-primary)"></div>
+          </div>
+        </div>
+
         <!-- Mini audio player -->
         <div id="transcript-player" class="transcript-player hidden">
           <audio id="transcript-audio" preload="none"></audio>

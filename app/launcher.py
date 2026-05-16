@@ -7,6 +7,9 @@ import threading
 import urllib.request
 import urllib.error
 from pathlib import Path
+from app.version import VERSION
+
+_window = None  # pywebview window reference, set in main()
 
 
 # ── Python API exposed to JavaScript via pywebview ────────────────────────────
@@ -14,14 +17,14 @@ class VozMeetApi:
     """Methods callable from JS as window.pywebview.api.<method>()"""
 
     def save_to_downloads(self, recording_id: int, fmt: str) -> dict:
-        """Fetch export from FastAPI and save to ~/Downloads. Returns {ok, path, error}."""
+        """Fetch export from FastAPI, show native save dialog, write to chosen path."""
         try:
             fmt = fmt.lower().strip()
-            if fmt not in ("txt", "md", "json"):
+            if fmt not in ("txt", "md", "json", "docx"):
                 return {"ok": False, "error": "Formato no válido"}
 
             url = f"http://127.0.0.1:8765/api/export/{recording_id}?format={fmt}"
-            with urllib.request.urlopen(url, timeout=30) as resp:
+            with urllib.request.urlopen(url, timeout=60) as resp:
                 data = resp.read()
                 content_disp = resp.headers.get("Content-Disposition", "")
 
@@ -29,9 +32,28 @@ class VozMeetApi:
             if "filename=" in content_disp:
                 filename = content_disp.split("filename=")[-1].strip().strip('"')
 
-            dest = Path.home() / "Downloads" / filename
+            # Show native macOS save panel
+            save_path = None
+            if _window:
+                try:
+                    import webview
+                    result = _window.create_file_dialog(
+                        webview.SAVE_DIALOG,
+                        directory=str(Path.home() / "Downloads"),
+                        save_filename=filename,
+                    )
+                    save_path = result[0] if result else None
+                except Exception:
+                    pass
+
+            # Fall back to ~/Downloads if dialog cancelled or unavailable
+            if not save_path:
+                save_path = str(Path.home() / "Downloads" / filename)
+
+            dest = Path(save_path)
+            dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
-            return {"ok": True, "path": str(dest), "filename": filename}
+            return {"ok": True, "path": str(dest), "filename": dest.name}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -50,7 +72,26 @@ class VozMeetApi:
         return {"ok": True}
 
     def get_version(self) -> str:
-        return "1.3"
+        return VERSION
+
+    def generate_summary(self, recording_id: int) -> dict:
+        """Trigger meeting summary generation. Returns {ok, summary} or {ok:False, error}."""
+        try:
+            url = f"http://127.0.0.1:8765/api/summary/{recording_id}"
+            req = urllib.request.Request(url, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                import json
+                result = json.loads(resp.read())
+            return {"ok": True, "summary": result.get("summary", "")}
+        except urllib.error.HTTPError as e:
+            try:
+                import json
+                detail = json.loads(e.read()).get("detail", str(e))
+            except Exception:
+                detail = str(e)
+            return {"ok": False, "error": detail}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -145,7 +186,18 @@ def _free_port():
         pass
 
 
+def _preload_whisper():
+    """Warm up the Whisper model in the background so first transcription is instant."""
+    try:
+        from app.core.transcriber import _get_model
+        _get_model()
+    except Exception:
+        pass
+
+
 def main():
+    global _window
+
     _configure_macos_app()
     _free_port()
 
@@ -155,6 +207,10 @@ def main():
     if not wait_for_server(timeout=30):
         print("Error: El servidor VozMeet no respondió a tiempo.", file=sys.stderr)
         sys.exit(1)
+
+    # Preload Whisper model in background while user is looking at the upload screen
+    preload_thread = threading.Thread(target=_preload_whisper, daemon=True)
+    preload_thread.start()
 
     try:
         import webview
@@ -167,7 +223,7 @@ def main():
         sys.exit(1)
 
     api = VozMeetApi()
-    window = webview.create_window(
+    _window = webview.create_window(
         "VozMeet",
         "http://127.0.0.1:8765",
         width=1100,
@@ -176,7 +232,7 @@ def main():
         frameless=False,
         js_api=api,
     )
-    window.events.closing += _on_closing
+    _window.events.closing += _on_closing
 
     webview.start()
     sys.exit(0)

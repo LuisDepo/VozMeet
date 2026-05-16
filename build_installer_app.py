@@ -9,20 +9,35 @@ from pathlib import Path
 
 # ── 1. Build tar.gz of app files ──────────────────────────────────────────────
 FILES = [
+    "app/api/export.py",
     "app/api/recordings.py",
+    "app/api/summary.py",
     "app/api/update.py",
     "app/core/pipeline.py",
+    "app/core/summarizer.py",
     "app/core/transcriber.py",
     "app/launcher.py",
     "app/main.py",
+    "app/version.py",
     "app/static/css/app.css",
+    "app/static/css/apple.css",
+    "app/static/img/cat-logo.svg",
     "app/static/index.html",
+    "app/static/js/api.js",
     "app/static/js/app.js",
+    "app/static/js/identify.js",
+    "app/static/js/process.js",
+    "app/static/js/transcript.js",
+    "app/static/js/upload.js",
+    "requirements.txt",
 ]
 buf = io.BytesIO()
 with tarfile.open(fileobj=buf, mode="w:gz") as tar:
     for f in FILES:
-        tar.add(f)
+        if Path(f).exists():
+            tar.add(f)
+        else:
+            print(f"WARNING: {f} not found, skipping")
 TAR_B64 = base64.b64encode(buf.getvalue()).decode()
 print(f"tar.gz: {len(buf.getvalue())} bytes  b64: {len(TAR_B64)} chars")
 
@@ -55,6 +70,7 @@ def _extract(b64_data, dest):
 
 INSTALL_DIR = Path.home() / "AppsBMS/VozMeet/VozMeet-claude-vozmeet-macos-app-EOB7u"
 VENV_PY = str(INSTALL_DIR / ".venv/bin/python")
+VENV_PIP = str(INSTALL_DIR / ".venv/bin/pip")
 
 try:
     # ── Pre-flight ────────────────────────────────────────────────────────────
@@ -71,7 +87,7 @@ try:
             "VozMeet Installer - Error")
         sys.exit(1)
 
-    _notify("Instalando VozMeet v1.3...")
+    _notify("Instalando VozMeet v1.4...")
     os.chdir(str(INSTALL_DIR))
 
     # ── Kill port 8765 ────────────────────────────────────────────────────────
@@ -90,6 +106,18 @@ try:
     # ── Extract app files ─────────────────────────────────────────────────────
     B64 = "TAR_B64_PLACEHOLDER"
     _extract(B64, str(INSTALL_DIR))
+
+    # ── Install new Python dependencies ──────────────────────────────────────
+    _notify("Instalando dependencias nuevas...")
+    new_deps = ["python-docx>=1.1.0", "mlx-whisper>=0.4.0", "mlx-lm>=0.20.0"]
+    for dep in new_deps:
+        try:
+            subprocess.run(
+                [VENV_PIP, "install", "--quiet", "--upgrade", dep],
+                capture_output=True, timeout=300
+            )
+        except Exception:
+            pass  # non-fatal — mlx packages only work on Apple Silicon
 
     # ── Build .app bundle ─────────────────────────────────────────────────────
     APP = INSTALL_DIR / "VozMeet.app"
@@ -115,7 +143,7 @@ try:
         '  <key>CFBundleName</key>          <string>VozMeet</string>\n'
         '  <key>CFBundleDisplayName</key>   <string>VozMeet</string>\n'
         '  <key>CFBundleIdentifier</key>    <string>com.bms.vozmeet</string>\n'
-        '  <key>CFBundleVersion</key>       <string>1.3</string>\n'
+        '  <key>CFBundleVersion</key>       <string>1.4</string>\n'
         '  <key>CFBundleExecutable</key>    <string>VozMeet</string>\n'
         '  <key>CFBundleIconFile</key>      <string>VozMeet</string>\n'
         '  <key>NSHighResolutionCapable</key><true/>\n'
@@ -143,7 +171,13 @@ try:
     subprocess.run(["killall", "Dock"], capture_output=True)
 
     _dialog(
-        "VozMeet v1.3 instalado correctamente.\n\n"
+        "VozMeet v1.4 instalado correctamente.\n\n"
+        "Novedades:\n"
+        "- Modelo medium + mlx-whisper (mas rapido en M1/M2/M3)\n"
+        "- Exportar a Word (.docx) ademas de TXT/MD/JSON\n"
+        "- Dialogo para elegir donde guardar\n"
+        "- Resumen de reunion con IA local (boton Resumen)\n"
+        "- Logo actualizado\n\n"
         "Abre VozMeet desde la carpeta Aplicaciones.",
         "Instalacion completada")
 
@@ -188,7 +222,7 @@ exe.chmod(exe.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     '  <key>CFBundleName</key>          <string>VozMeet Installer</string>\n'
     '  <key>CFBundleDisplayName</key>   <string>VozMeet Installer</string>\n'
     '  <key>CFBundleIdentifier</key>    <string>com.bms.vozmeet.installer</string>\n'
-    '  <key>CFBundleVersion</key>       <string>1.3</string>\n'
+    '  <key>CFBundleVersion</key>       <string>1.4</string>\n'
     '  <key>CFBundleExecutable</key>    <string>VozMeet-Installer</string>\n'
     '  <key>NSHighResolutionCapable</key><true/>\n'
     '  <key>LSUIElement</key>           <true/>\n'
@@ -201,6 +235,9 @@ assert content.startswith("#!/usr/bin/python3"), "bad shebang"
 assert "TAR_B64_PLACEHOLDER" not in content, "placeholder not replaced"
 assert "filter=" in content and "TypeError" in content, "no py<3.12 fallback"
 assert "except Exception as e:" in content, "no error handler"
+assert "mlx-whisper" in content, "missing mlx-whisper dep install"
+assert "python-docx" in content, "missing python-docx dep install"
+assert "1.4" in content, "version not updated"
 print("Content checks: OK")
 
 # ── Zip ───────────────────────────────────────────────────────────────────────

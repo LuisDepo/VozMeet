@@ -18,9 +18,10 @@ TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 VOICE_SAMPLES_DIR = DATA_DIR / "voice_samples"
 DB_PATH = DATA_DIR / "vozmeet.db"
 
-WHISPER_MODEL = "large-v3-turbo"
+WHISPER_MODEL = "medium"
 WHISPER_COMPUTE_TYPE = "int8"
 WHISPER_DEVICE = "auto"
+MLX_WHISPER_REPO = "mlx-community/whisper-medium-mlx"
 
 PYANNOTE_MODEL = "pyannote/speaker-diarization-3.1"
 HF_TOKEN = os.getenv("HF_TOKEN", "")

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Cat ears -->
+  <polygon points="8,28 18,4 28,28" stroke="currentColor" stroke-width="4" stroke-linejoin="round" fill="none"/>
+  <polygon points="36,28 46,4 56,28" stroke="currentColor" stroke-width="4" stroke-linejoin="round" fill="none"/>
+  <!-- Cat head -->
+  <ellipse cx="32" cy="38" rx="22" ry="20" stroke="currentColor" stroke-width="4" fill="none"/>
+  <!-- Eyes -->
+  <ellipse cx="22" cy="34" rx="4" ry="5" stroke="currentColor" stroke-width="3" fill="none"/>
+  <ellipse cx="42" cy="34" rx="4" ry="5" stroke="currentColor" stroke-width="3" fill="none"/>
+  <!-- Nose -->
+  <polygon points="32,42 29,46 35,46" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round" fill="none"/>
+  <!-- Mouth -->
+  <path d="M29,46 Q26,50 24,49" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+  <path d="M35,46 Q38,50 40,49" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+  <!-- Whiskers left -->
+  <line x1="8" y1="43" x2="26" y2="43" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  <line x1="8" y1="47" x2="26" y2="46" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  <!-- Whiskers right -->
+  <line x1="38" y1="43" x2="56" y2="43" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  <line x1="38" y1="46" x2="56" y2="47" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+</svg>

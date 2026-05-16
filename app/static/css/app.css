@@ -571,3 +571,10 @@
 .spk-text-5 { color: #0096cc; }
 .spk-text-6 { color: #FF2D55; }
 .spk-text-7 { color: #b89400; }
+
+/* ─── Summary panel ─────────────────────────────── */
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+#summary-loading > div:first-child { display:inline-block; animation: spin-slow 1.2s linear infinite; }

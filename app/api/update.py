@@ -10,7 +10,7 @@ router = APIRouter()
 log = get_logger("update")
 
 GITHUB_ZIP = "https://github.com/luisdepo/vozmeet/archive/refs/heads/main.zip"
-CURRENT_VERSION = "1.2"
+from app.version import VERSION as CURRENT_VERSION
 
 
 @router.get("/update/check")

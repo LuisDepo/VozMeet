@@ -128,7 +128,8 @@ function buildHistoryRow(rec) {
 
   const exportBtns = rec.status === 'done' ? `
     <button class="btn btn-sm btn-secondary" onclick="exportFromHistory(${rec.id},'txt')" aria-label="Descargar TXT">TXT</button>
-    <button class="btn btn-sm btn-secondary" onclick="exportFromHistory(${rec.id},'md')" aria-label="Descargar MD">MD</button>` : '';
+    <button class="btn btn-sm btn-secondary" onclick="exportFromHistory(${rec.id},'md')" aria-label="Descargar MD">MD</button>
+    <button class="btn btn-sm btn-secondary" onclick="exportFromHistory(${rec.id},'docx')" aria-label="Descargar Word">Word</button>` : '';
 
   row.innerHTML = `
     <div class="recording-icon">🎙️</div>
@@ -159,7 +160,7 @@ async function exportFromHistory(recordingId, fmt) {
   try {
     if (window.pywebview && window.pywebview.api) {
       const result = await window.pywebview.api.save_to_downloads(recordingId, fmt);
-      if (result.ok) showToast(`Guardado en Descargas: ${result.filename}`, 'success');
+      if (result.ok) showToast(`Guardado: ${result.filename}`, 'success');
       else showToast('Error al exportar: ' + result.error, 'error');
     } else {
       window.location.href = API.exportUrl(recordingId, fmt);

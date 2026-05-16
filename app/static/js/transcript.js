@@ -174,7 +174,7 @@ const Transcript = (() => {
   }
 
   function setupExportBtns(recordingId) {
-    ['txt', 'md', 'json'].forEach(fmt => {
+    ['txt', 'md', 'docx', 'json'].forEach(fmt => {
       const btn = document.getElementById(`export-${fmt}-btn`);
       if (!btn) return;
       btn.onclick = async () => {
@@ -185,7 +185,7 @@ const Transcript = (() => {
           if (window.pywebview && window.pywebview.api) {
             const result = await window.pywebview.api.save_to_downloads(recordingId, fmt);
             if (result.ok) {
-              showToast(`Guardado en Descargas: ${result.filename}`, 'success');
+              showToast(`Guardado: ${result.filename}`, 'success');
             } else {
               showToast('Error al exportar: ' + result.error, 'error');
             }
@@ -200,6 +200,52 @@ const Transcript = (() => {
         }
       };
     });
+
+    // Summary button
+    const summaryBtn = document.getElementById('summary-btn');
+    const summaryPanel = document.getElementById('summary-panel');
+    const summaryLoading = document.getElementById('summary-loading');
+    const summaryContent = document.getElementById('summary-content');
+    const summaryClose = document.getElementById('summary-close-btn');
+
+    if (summaryBtn) {
+      summaryBtn.onclick = async () => {
+        summaryPanel.classList.remove('hidden');
+        summaryLoading.classList.remove('hidden');
+        summaryContent.textContent = '';
+        summaryBtn.disabled = true;
+
+        try {
+          let text = '';
+          if (window.pywebview && window.pywebview.api) {
+            const result = await window.pywebview.api.generate_summary(recordingId);
+            if (result.ok) {
+              text = result.summary;
+            } else {
+              text = 'Error: ' + result.error;
+            }
+          } else {
+            const res = await fetch(`/api/summary/${recordingId}`);
+            if (!res.ok) {
+              const j = await res.json().catch(() => ({}));
+              throw new Error(j.detail || `Error ${res.status}`);
+            }
+            const j = await res.json();
+            text = j.summary;
+          }
+          summaryContent.textContent = text;
+        } catch (e) {
+          summaryContent.textContent = 'Error al generar resumen: ' + e.message;
+        } finally {
+          summaryLoading.classList.add('hidden');
+          summaryBtn.disabled = false;
+        }
+      };
+    }
+
+    if (summaryClose) {
+      summaryClose.onclick = () => summaryPanel.classList.add('hidden');
+    }
   }
 
   // ── Helpers ──────────────────────────────────────────────────────

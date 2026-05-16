@@ -1,8 +1,9 @@
 from pathlib import Path
 from typing import Optional, Callable
-from app.config import WHISPER_MODEL, WHISPER_COMPUTE_TYPE, WHISPER_DEVICE
+from app.config import WHISPER_MODEL, WHISPER_COMPUTE_TYPE, WHISPER_DEVICE, MLX_WHISPER_REPO
 
 _model = None
+_backend = None  # "mlx" or "faster_whisper"
 
 
 def is_loaded() -> bool:
@@ -10,17 +11,26 @@ def is_loaded() -> bool:
 
 
 def _get_model():
-    global _model
+    global _model, _backend
     if _model is None:
-        from faster_whisper import WhisperModel
-        device = WHISPER_DEVICE
-        if device == "auto":
-            try:
-                import torch
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-            except ImportError:
-                device = "cpu"
-        _model = WhisperModel(WHISPER_MODEL, device=device, compute_type=WHISPER_COMPUTE_TYPE)
+        # Try mlx-whisper first (Apple Silicon — uses Neural Engine, ~3-5× faster)
+        try:
+            import mlx_whisper  # noqa: F401
+            import mlx.core  # confirm mlx itself is available
+            _backend = "mlx"
+            # mlx_whisper loads lazily on first transcribe call; store sentinel
+            _model = {"backend": "mlx", "repo": MLX_WHISPER_REPO}
+        except (ImportError, Exception):
+            from faster_whisper import WhisperModel
+            device = WHISPER_DEVICE
+            if device == "auto":
+                try:
+                    import torch
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                except ImportError:
+                    device = "cpu"
+            _model = WhisperModel(WHISPER_MODEL, device=device, compute_type=WHISPER_COMPUTE_TYPE)
+            _backend = "faster_whisper"
     return _model
 
 
@@ -32,6 +42,47 @@ def transcribe(
     model = _get_model()
     audio_path = str(audio_path)
 
+    if _backend == "mlx":
+        return _transcribe_mlx(audio_path, language, progress_cb, model["repo"])
+    else:
+        return _transcribe_faster_whisper(audio_path, language, progress_cb, model)
+
+
+def _transcribe_mlx(audio_path, language, progress_cb, repo):
+    import mlx_whisper
+
+    kwargs = {"path_or_hf_repo": repo, "word_timestamps": False}
+    if language:
+        kwargs["language"] = language
+
+    result = mlx_whisper.transcribe(audio_path, **kwargs)
+
+    raw_segments = result.get("segments", [])
+    lang = result.get("language", "es")
+
+    # Estimate total duration from last segment
+    total_duration = raw_segments[-1]["end"] if raw_segments else 1.0
+
+    segments = []
+    for seg in raw_segments:
+        segments.append({
+            "start": round(float(seg["start"]), 3),
+            "end": round(float(seg["end"]), 3),
+            "text": seg["text"].strip(),
+            "confidence": round(float(seg.get("avg_logprob", 0.0)), 4),
+        })
+        if progress_cb:
+            progress_cb(min(float(seg["end"]) / max(total_duration, 1.0), 1.0))
+
+    return {
+        "segments": segments,
+        "language": lang,
+        "language_display": _lang_display(lang),
+        "duration": round(total_duration, 2),
+    }
+
+
+def _transcribe_faster_whisper(audio_path, language, progress_cb, model):
     segments_iter, info = model.transcribe(
         audio_path,
         language=language,
@@ -56,12 +107,10 @@ def transcribe(
             progress_cb(min(seg.end / total_duration, 1.0))
 
     lang = info.language
-    lang_display = _lang_display(lang)
-
     return {
         "segments": segments,
         "language": lang,
-        "language_display": lang_display,
+        "language_display": _lang_display(lang),
         "duration": round(info.duration, 2),
     }
 
