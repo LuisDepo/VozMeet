@@ -21,6 +21,7 @@ FILES = [
     "app/version.py",
     "app/static/css/app.css",
     "app/static/css/apple.css",
+    "app/static/icons/VozMeet.icns",
     "app/static/img/cat-logo.svg",
     "app/static/index.html",
     "app/static/js/api.js",
@@ -209,6 +210,14 @@ if app_root.exists():
     shutil.rmtree(str(app_root))
 macos = app_root / "Contents/MacOS"
 macos.mkdir(parents=True)
+resources = app_root / "Contents/Resources"
+resources.mkdir(parents=True)
+
+# Copy icon into installer bundle so Finder shows it on the downloaded file
+icon_src = Path("app/static/icons/VozMeet.icns")
+if not icon_src.exists():
+    raise SystemExit("Icon missing — run: python3 build_icon.py")
+shutil.copy2(str(icon_src), str(resources / "VozMeet.icns"))
 
 exe = macos / "VozMeet-Installer"
 exe.write_text(installer_py)
@@ -224,6 +233,8 @@ exe.chmod(exe.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     '  <key>CFBundleIdentifier</key>    <string>com.bms.vozmeet.installer</string>\n'
     '  <key>CFBundleVersion</key>       <string>1.4</string>\n'
     '  <key>CFBundleExecutable</key>    <string>VozMeet-Installer</string>\n'
+    '  <key>CFBundleIconFile</key>      <string>VozMeet</string>\n'
+    '  <key>CFBundleIconName</key>      <string>VozMeet</string>\n'
     '  <key>NSHighResolutionCapable</key><true/>\n'
     '  <key>LSUIElement</key>           <true/>\n'
     '</dict></plist>\n'

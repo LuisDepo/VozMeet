@@ -5,8 +5,10 @@
   <key>CFBundleName</key>          <string>VozMeet Installer</string>
   <key>CFBundleDisplayName</key>   <string>VozMeet Installer</string>
   <key>CFBundleIdentifier</key>    <string>com.bms.vozmeet.installer</string>
-  <key>CFBundleVersion</key>       <string>1.3</string>
+  <key>CFBundleVersion</key>       <string>1.4</string>
   <key>CFBundleExecutable</key>    <string>VozMeet-Installer</string>
+  <key>CFBundleIconFile</key>      <string>VozMeet</string>
+  <key>CFBundleIconName</key>      <string>VozMeet</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSUIElement</key>           <true/>
 </dict></plist>
