@@ -112,21 +112,6 @@ VENV_PY  = str(INSTALL_DIR / ".venv/bin/python")
 VENV_PIP = str(INSTALL_DIR / ".venv/bin/pip")
 B64 = "TAR_B64_PLACEHOLDER"
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-try:
-    fresh = not INSTALL_DIR.exists() or not Path(VENV_PY).exists()
-    if fresh:
-        _do_fresh_install()
-    else:
-        _do_update()
-except Exception as e:
-    import traceback
-    _dialog(
-        "Error durante la instalacion:\n\n" + str(e) +
-        "\n\nCaptura este mensaje y reportalo.",
-        "VozMeet Installer - Error")
-    sys.exit(1)
-
 # ── Fresh install ─────────────────────────────────────────────────────────────
 def _do_fresh_install():
     btn = _dialog(
@@ -347,6 +332,20 @@ def _find_python():
 def _check_ffmpeg():
     r = subprocess.run(["which", "ffmpeg"], capture_output=True, text=True)
     return r.returncode == 0
+
+# ── Entry point (after all defs) ──────────────────────────────────────────────
+try:
+    fresh = not INSTALL_DIR.exists() or not Path(VENV_PY).exists()
+    if fresh:
+        _do_fresh_install()
+    else:
+        _do_update()
+except Exception as e:
+    _dialog(
+        "Error durante la instalacion:\n\n" + str(e) +
+        "\n\nCaptura este mensaje y reportalo.",
+        "VozMeet Installer - Error")
+    sys.exit(1)
 '''
 
 installer_py = INSTALLER_PY.replace("TAR_B64_PLACEHOLDER", TAR_B64)
