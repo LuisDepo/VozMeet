@@ -695,9 +695,41 @@ if not icon_src.exists():
     raise SystemExit("Icon missing — run: python3 build_icon.py")
 shutil.copy2(str(icon_src), str(resources / "VozMeet.icns"))
 
+# The CFBundleExecutable must be a /bin/sh script — macOS refuses to launch
+# a Python script directly as a .app on some machines ("No se encuentra el
+# archivo").  The shell launcher finds python3 wherever it lives and execs
+# the actual installer (installer.py in the same MacOS directory).
+SHELL_LAUNCHER = r'''#!/bin/sh
+# VozMeet Installer launcher — finds python3 and runs the real installer.
+DIR="$(cd "$(dirname "$0")" && pwd)"
+PY=""
+for candidate in \
+    /usr/bin/python3 \
+    /opt/homebrew/bin/python3 \
+    /usr/local/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11 \
+    /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 \
+    /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 \
+    python3; do
+    if [ -x "$candidate" ] 2>/dev/null || command -v "$candidate" >/dev/null 2>&1; then
+        PY="$candidate"
+        break
+    fi
+done
+if [ -z "$PY" ]; then
+    osascript -e 'display dialog "Python 3 no encontrado.\n\nInstala Python desde python.org y vuelve a abrir el instalador." buttons {"OK"} default button "OK" with icon stop with title "VozMeet Installer"'
+    exit 1
+fi
+exec "$PY" "$DIR/installer.py" "$@"
+'''
+
 exe = macos / "VozMeet-Installer"
-exe.write_text(installer_py)
-exe.chmod(exe.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+exe.write_text(SHELL_LAUNCHER)
+exe.chmod(0o755)
+
+py_installer = macos / "installer.py"
+py_installer.write_text(installer_py)
+py_installer.chmod(0o644)
 
 (app_root / "Contents/Info.plist").write_text(
     '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -707,7 +739,7 @@ exe.chmod(exe.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     '  <key>CFBundleName</key>          <string>VozMeet Installer</string>\n'
     '  <key>CFBundleDisplayName</key>   <string>VozMeet Installer</string>\n'
     '  <key>CFBundleIdentifier</key>    <string>com.bms.vozmeet.installer</string>\n'
-    '  <key>CFBundleVersion</key>       <string>1.5</string>\n'
+    '  <key>CFBundleVersion</key>       <string>1.5.2</string>\n'
     '  <key>CFBundleExecutable</key>    <string>VozMeet-Installer</string>\n'
     '  <key>CFBundleIconFile</key>      <string>VozMeet</string>\n'
     '  <key>CFBundleIconName</key>      <string>VozMeet</string>\n'
@@ -717,7 +749,7 @@ exe.chmod(exe.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 )
 
 # ── Verify ────────────────────────────────────────────────────────────────────
-content = exe.read_text()
+content = py_installer.read_text()
 assert content.startswith("#!/usr/bin/python3"), "bad shebang"
 assert "TAR_B64_PLACEHOLDER" not in content, "placeholder not replaced"
 assert "filter=" in content and "TypeError" in content, "no py<3.12 fallback"
@@ -742,16 +774,31 @@ assert "_python_arch" in content, "missing arch detection"
 assert "_venv_is_arm64" in content, "missing venv arch check"
 assert "_create_venv_and_install" in content, "missing shared venv builder"
 assert "Rosetta" in content, "missing Intel/Rosetta repair"
+# Verify shell launcher
+shell_content = exe.read_text()
+assert shell_content.startswith("#!/bin/sh"), "launcher must be a sh script"
+assert "installer.py" in shell_content, "launcher must call installer.py"
+assert "python3" in shell_content, "launcher must find python3"
 print("Content checks: OK")
 
 # ── Zip ───────────────────────────────────────────────────────────────────────
+# Use zipfile.ZipInfo to set permissions explicitly so macOS Archive Utility
+# honours the execute bit on the shell launcher after extraction.
 zip_path = Path("/tmp/VozMeet-Installer.zip")
 with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
-    for path in app_root.rglob("*"):
+    for path in sorted(app_root.rglob("*")):
         arcname = str(path.relative_to(app_root.parent))
-        zf.write(str(path), arcname)
-        if path.is_file():
-            zf.getinfo(arcname).external_attr = (path.stat().st_mode & 0xFFFF) << 16
+        if path.is_dir():
+            zi = zipfile.ZipInfo(arcname + "/")
+            zi.external_attr = (0o40755 & 0xFFFF) << 16
+            zf.writestr(zi, "")
+        else:
+            mode = path.stat().st_mode
+            zi = zipfile.ZipInfo(arcname)
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            zi.external_attr = (mode & 0xFFFF) << 16
+            zi.create_system = 3  # Unix
+            zf.writestr(zi, path.read_bytes())
 
 print(f"ZIP: {zip_path}  ({zip_path.stat().st_size:,} bytes)")
 print("DONE — ready to upload")
