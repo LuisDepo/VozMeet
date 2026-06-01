@@ -53,7 +53,16 @@ class VozMeetApi:
                         directory=str(Path.home() / "Downloads"),
                         save_filename=filename,
                     )
-                    save_path = result[0] if result else None
+                    # pywebview SAVE_DIALOG returns a list/tuple on some
+                    # versions and a bare string on others.  result[0] on a
+                    # string gives the first character ("/"), which causes
+                    # [Errno 17] when writing to the root path.
+                    if isinstance(result, (list, tuple)):
+                        save_path = result[0] if result else None
+                    elif isinstance(result, str) and result:
+                        save_path = result
+                    else:
+                        save_path = None
                 except Exception:
                     pass
 
