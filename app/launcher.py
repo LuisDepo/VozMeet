@@ -264,9 +264,26 @@ def main():
             )
 
         api = VozMeetApi()
+
+        # Use a local HTML splash so WKWebView has something to render
+        # immediately. Navigating via load_url() inside webview.start(func=)
+        # avoids the pywebview 5.x race where passing a URL to create_window()
+        # causes an immediate connection attempt before the Cocoa run loop is
+        # ready, which makes WKWebView.Networking terminate and close the window.
+        _LOADING_HTML = (
+            "<html><head><style>"
+            "body{margin:0;background:#1a1a1a;display:flex;align-items:center;"
+            "justify-content:center;height:100vh;font-family:sans-serif;color:#888}"
+            ".dot{animation:blink 1s infinite alternate}"
+            "@keyframes blink{from{opacity:.2}to{opacity:1}}"
+            "</style></head><body>"
+            "<p style='font-size:18px'>Cargando VozMeet<span class=dot>...</span></p>"
+            "</body></html>"
+        )
+
         _window = webview.create_window(
             "VozMeet",
-            "http://127.0.0.1:8765",
+            html=_LOADING_HTML,
             width=1100,
             height=750,
             min_size=(900, 600),
@@ -274,7 +291,13 @@ def main():
             js_api=api,
         )
         _window.events.closing += _on_closing
-        webview.start()
+
+        def _navigate():
+            # Small delay to let WKWebView settle before the first navigation
+            time.sleep(0.5)
+            _window.load_url("http://127.0.0.1:8765")
+
+        webview.start(func=_navigate)
         sys.exit(0)
 
     except SystemExit:
