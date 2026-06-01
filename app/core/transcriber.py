@@ -28,22 +28,29 @@ def is_loaded() -> bool:
 def _get_model():
     global _model, _backend
     if _model is None:
-        # Try mlx-whisper first (Apple Silicon — uses Neural Engine, ~3-5× faster)
-        try:
-            _t("import mlx_whisper")
-            import mlx_whisper  # noqa: F401
-            _t("import mlx.core (initialises Metal)")
-            import mlx.core  # confirm mlx itself is available
-            _t("mlx backend ready")
-            _backend = "mlx"
-            # mlx_whisper loads lazily on first transcribe call; store sentinel
-            _model = {"backend": "mlx", "repo": MLX_WHISPER_REPO}
-        except Exception as e:
-            # Any non-fatal failure (mlx not installed, or Metal init raised a
-            # Python error) falls back to faster-whisper. A *fatal* C-extension
-            # abort (signal) can't be caught here — the startup.log line above
-            # will be the last entry, telling us which import killed the process.
-            _t("mlx unavailable (" + repr(e) + "), falling back to faster_whisper")
+        # .mlx_disabled is written by the installer (or the preload subprocess) when
+        # import mlx.core causes a SIGABRT on this machine (e.g. M1 Metal init crash).
+        # A SIGABRT in a background thread kills the entire process — no error dialog,
+        # no exception, just a blank window that closes. Skipping mlx entirely is the
+        # correct fix; faster-whisper works on all Macs.
+        _mlx_disabled = (Path(__file__).parent.parent / ".mlx_disabled").exists()
+
+        if not _mlx_disabled:
+            try:
+                _t("import mlx_whisper")
+                import mlx_whisper  # noqa: F401
+                _t("import mlx.core (initialises Metal)")
+                import mlx.core  # confirm mlx itself is available
+                _t("mlx backend ready")
+                _backend = "mlx"
+                # mlx_whisper loads lazily on first transcribe call; store sentinel
+                _model = {"backend": "mlx", "repo": MLX_WHISPER_REPO}
+            except Exception as e:
+                _t("mlx unavailable (" + repr(e) + "), falling back to faster_whisper")
+        else:
+            _t("mlx disabled (.mlx_disabled flag) — using faster_whisper directly")
+
+        if _model is None:
             _t("import faster_whisper")
             from faster_whisper import WhisperModel
             device = WHISPER_DEVICE

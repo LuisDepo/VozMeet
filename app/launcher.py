@@ -235,18 +235,57 @@ def _trace(msg: str):
 
 
 def _preload_whisper():
-    """Warm up the Whisper model in the background so first transcription is instant.
+    """Warm up the Whisper model in an isolated subprocess.
 
-    Wrapped in detailed tracing because a fatal C-extension abort here
-    (e.g. OpenMP runtime conflict, Metal init) kills the whole process
-    without a Python traceback."""
+    A SIGABRT in ANY thread (e.g. import mlx.core failing Metal init on M1)
+    kills the entire Python process — no exception, no error dialog, blank
+    window closes instantly. Running the preload in a subprocess confines
+    any C-extension crash to the child; the main app stays alive.
+
+    If the subprocess crashes we write .mlx_disabled so all future calls to
+    _get_model() (during actual transcription) skip mlx and use faster-whisper,
+    which works on every Mac."""
     _trace("preload: thread started")
+    import subprocess
     try:
-        _trace("preload: importing transcriber")
-        from app.core.transcriber import _get_model
-        _trace("preload: calling _get_model()")
-        _get_model()
-        _trace("preload: model loaded OK")
+        project_root = str(Path(__file__).parent.parent)
+        mlx_flag = Path(__file__).parent.parent / ".mlx_disabled"
+
+        _trace("preload: launching isolated subprocess")
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, " + repr(project_root) + ");"
+             " from app.core.transcriber import _get_model; _get_model();"
+             " print('preload_ok')"],
+            capture_output=True, text=True, timeout=120,
+        )
+
+        if r.returncode == 0 and "preload_ok" in r.stdout:
+            _trace("preload: model loaded OK in subprocess")
+        else:
+            _trace(
+                "preload: subprocess rc=" + str(r.returncode) +
+                " stderr=" + r.stderr[:300]
+            )
+            # Non-zero exit (likely SIGABRT from mlx Metal init) — disable mlx
+            if r.returncode != 0 and not mlx_flag.exists():
+                _trace("preload: writing .mlx_disabled (Metal init crash detected)")
+                try:
+                    mlx_flag.write_text("Crash rc=" + str(r.returncode) + "\n")
+                except Exception:
+                    pass
+
+            # Retry in-process: .mlx_disabled is now set so faster-whisper is used
+            try:
+                _trace("preload: retrying in-process with faster-whisper")
+                from app.core.transcriber import _get_model
+                _get_model()
+                _trace("preload: faster-whisper ready")
+            except Exception as e2:
+                _trace("preload: fallback also failed: " + repr(e2))
+
+    except subprocess.TimeoutExpired:
+        _trace("preload: subprocess timed out (120s)")
     except Exception as e:
         _trace("preload: exception " + repr(e))
 

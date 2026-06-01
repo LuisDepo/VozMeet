@@ -281,6 +281,9 @@ def _do_update():
         except Exception:
             pass
 
+    # Re-test Metal compatibility every update — mlx may have been fixed upstream
+    _test_and_configure_mlx()
+
     _log("Actualizando VozMeet.app...")
     _build_app()
 
@@ -328,6 +331,30 @@ def _create_venv_and_install(python_bin):
             except Exception:
                 pass
         _log("Aceleracion mlx lista.")
+        _test_and_configure_mlx()
+
+# ── Shared: test Metal / mlx compatibility ───────────────────────────────────
+def _test_and_configure_mlx():
+    """Run import mlx.core in an isolated subprocess.
+
+    On some M1 configurations, Metal initialisation calls abort() (SIGABRT).
+    A SIGABRT inside any Python thread kills the entire app silently.
+    We run the test in a subprocess so a crash only kills the child.
+    If it crashes we write .mlx_disabled — the transcriber then skips
+    mlx and goes straight to faster-whisper, which works on every Mac."""
+    if platform.machine() != "arm64":
+        return
+    _log("Verificando compatibilidad Metal/mlx en este Mac...")
+    r = _run([VENV_PY, "-c", "import mlx.core; print('mlx_metal_ok')"], timeout=30)
+    disabled = INSTALL_DIR / ".mlx_disabled"
+    if r.returncode == 0 and "mlx_metal_ok" in r.stdout:
+        _log("Metal/mlx compatible — aceleracion Neural Engine activa.")
+        if disabled.exists():
+            disabled.unlink(missing_ok=True)
+    else:
+        _log("Metal/mlx no compatible en este Mac (rc=" + str(r.returncode) +
+             "). Usando faster-whisper (igual de preciso, solo mas lento).")
+        disabled.write_text("Crash rc=" + str(r.returncode) + "\n")
 
 # ── Shared: build VozMeet.app ─────────────────────────────────────────────────
 def _build_app():
@@ -674,6 +701,9 @@ assert "ffmpeg-static" in content, "missing ffmpeg download url"
 assert "administrator privileges" in content, "missing admin install"
 assert "mlx-whisper" in content, "missing mlx-whisper"
 assert "python-docx" in content, "missing python-docx"
+assert "_test_and_configure_mlx" in content, "missing mlx Metal compatibility test"
+assert "mlx_metal_ok" in content, "missing mlx_metal_ok check"
+assert ".mlx_disabled" in content, "missing mlx_disabled flag"
 assert "1.4" in content, "version not updated"
 assert "_show_progress_window" in content, "missing progress window"
 assert "tkinter" in content, "missing tkinter"
