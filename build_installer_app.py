@@ -61,7 +61,8 @@ print(f"tar.gz: {len(buf.getvalue())} bytes  b64: {len(TAR_B64)} chars")
 
 # ── 2. Python installer script ────────────────────────────────────────────────
 INSTALLER_PY = r'''#!/usr/bin/python3
-import base64, tarfile, io, os, stat, shutil, subprocess, sys, time
+import base64, tarfile, io, os, stat, shutil, subprocess, sys, time, platform
+import urllib.request
 from pathlib import Path
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
@@ -117,40 +118,33 @@ def _do_fresh_install():
     btn = _dialog(
         "Bienvenido al instalador de VozMeet v1.4\n\n"
         "Esto instalara VozMeet en:\n" + str(INSTALL_DIR) + "\n\n"
+        "El instalador descargara e instalara TODO lo necesario\n"
+        "automaticamente (Python, ffmpeg, modelos de IA).\n\n"
         "Necesitaras:\n"
-        "- Conexion a internet (descarga ~3-5 GB de modelos de IA)\n"
+        "- Conexion a internet (descarga varios GB)\n"
         "- Un token gratuito de HuggingFace\n"
         "- 20-40 minutos la primera vez\n\n"
-        "El proceso es automatico. Solo espera.",
+        "Es posible que te pida tu contrasena de Mac\n"
+        "para instalar Python. Eso es normal.",
         "VozMeet Installer",
         ["Cancelar", "Instalar"])
     if btn == "Cancelar":
         sys.exit(0)
 
-    # ── Buscar Python 3.11+ ───────────────────────────────────────────────────
+    # ── Python 3.11+ (instalar automaticamente si falta) ─────────────────────
     _notify("Buscando Python 3.11+...")
     python_bin = _find_python()
     if not python_bin:
-        _dialog(
+        b = _dialog(
             "No se encontro Python 3.11 o superior.\n\n"
-            "Instala Python desde:\n"
-            "https://www.python.org/downloads/macos/\n\n"
-            "O instala Homebrew (brew.sh) y luego:\n"
-            "  brew install python@3.11",
-            "VozMeet Installer - Error")
-        sys.exit(1)
-
-    # ── Verificar ffmpeg ──────────────────────────────────────────────────────
-    _notify("Verificando ffmpeg...")
-    if not _check_ffmpeg():
-        _dialog(
-            "ffmpeg no esta instalado.\n\n"
-            "VozMeet necesita ffmpeg para convertir audio.\n\n"
-            "Instala Homebrew desde brew.sh y luego:\n"
-            "  brew install ffmpeg\n\n"
-            "Luego vuelve a ejecutar el instalador.",
-            "VozMeet Installer - Error")
-        sys.exit(1)
+            "VozMeet puede instalarlo automaticamente desde\n"
+            "el sitio oficial python.org (~45 MB).\n\n"
+            "Te pedira tu contrasena de Mac para instalarlo.",
+            "VozMeet - Instalar Python",
+            ["Cancelar", "Instalar Python"])
+        if b == "Cancelar":
+            sys.exit(0)
+        python_bin = _install_python()
 
     # ── Crear directorio y extraer archivos ──────────────────────────────────
     _notify("Creando directorio de instalacion...")
@@ -158,6 +152,12 @@ def _do_fresh_install():
     os.chdir(str(INSTALL_DIR))
     _notify("Extrayendo archivos de VozMeet...")
     _extract(B64, str(INSTALL_DIR))
+
+    # ── ffmpeg (descargar binario estatico si falta) ─────────────────────────
+    _notify("Verificando ffmpeg...")
+    if not _find_ffmpeg_path():
+        _notify("Descargando ffmpeg...")
+        _install_ffmpeg(INSTALL_DIR)
 
     # ── Crear entorno virtual ─────────────────────────────────────────────────
     _notify("Creando entorno virtual Python...")
@@ -169,11 +169,29 @@ def _do_fresh_install():
     _notify("Actualizando pip...")
     _run([VENV_PIP, "install", "--upgrade", "pip", "--quiet"])
 
+    # Las dependencias mlx-* solo existen en Apple Silicon; se instalan aparte
+    # para que en Intel no fallen y aborten toda la instalacion.
     _notify("Instalando dependencias (puede tardar 20-40 min)...")
-    reqs = str(INSTALL_DIR / "requirements.txt")
-    r = _run([VENV_PIP, "install", "-r", reqs, "--quiet"], timeout=3600)
+    reqs_path = INSTALL_DIR / "requirements.txt"
+    all_lines = [l for l in reqs_path.read_text().splitlines() if l.strip()]
+    core_lines = [l for l in all_lines if "mlx" not in l.lower()]
+    mlx_lines  = [l for l in all_lines if "mlx" in l.lower()]
+
+    core_req = INSTALL_DIR / "_req_core.txt"
+    core_req.write_text("\n".join(core_lines) + "\n")
+    r = _run([VENV_PIP, "install", "-r", str(core_req), "--quiet"], timeout=3600)
+    core_req.unlink(missing_ok=True)
     if r.returncode != 0:
         raise RuntimeError("Error instalando dependencias:\n" + r.stderr[-1000:])
+
+    # mlx (aceleracion Apple Silicon) — no fatal si falla (p.ej. en Intel)
+    if platform.machine() == "arm64":
+        _notify("Instalando aceleracion Apple Silicon (mlx)...")
+        for dep in mlx_lines:
+            try:
+                _run([VENV_PIP, "install", "--quiet", dep], timeout=600)
+            except Exception:
+                pass
 
     # ── Token HuggingFace ─────────────────────────────────────────────────────
     _notify("Configurando HuggingFace...")
@@ -231,10 +249,21 @@ def _do_update():
     os.chdir(str(INSTALL_DIR))
     _extract(B64, str(INSTALL_DIR))
 
-    _notify("Instalando dependencias nuevas...")
-    for dep in ["python-docx>=1.1.0", "mlx-whisper>=0.4.0", "mlx-lm>=0.20.0"]:
+    # Asegurar ffmpeg (por si el equipo no lo tiene en PATH)
+    if not _find_ffmpeg_path():
+        _notify("Descargando ffmpeg...")
         try:
-            _run([VENV_PIP, "install", "--quiet", "--upgrade", dep], timeout=300)
+            _install_ffmpeg(INSTALL_DIR)
+        except Exception:
+            pass
+
+    _notify("Instalando dependencias nuevas...")
+    deps = ["python-docx>=1.1.0"]
+    if platform.machine() == "arm64":
+        deps += ["mlx-whisper>=0.4.0", "mlx-lm>=0.20.0"]
+    for dep in deps:
+        try:
+            _run([VENV_PIP, "install", "--quiet", "--upgrade", dep], timeout=600)
         except Exception:
             pass
 
@@ -329,9 +358,76 @@ def _find_python():
                 pass
     return None
 
-def _check_ffmpeg():
-    r = subprocess.run(["which", "ffmpeg"], capture_output=True, text=True)
-    return r.returncode == 0
+def _find_ffmpeg_path():
+    """Return a path to a working ffmpeg, or None. Searches PATH + common dirs."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    candidates = [
+        str(INSTALL_DIR / "bin" / "ffmpeg"),
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ]
+    for c in candidates:
+        if Path(c).exists() and os.access(c, os.X_OK):
+            return c
+    return None
+
+def _install_python():
+    """Download and install the official python.org universal2 package."""
+    url = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg"
+    pkg = "/tmp/vozmeet_python-3.11.9.pkg"
+    _notify("Descargando Python 3.11.9 (~45 MB)...")
+    urllib.request.urlretrieve(url, pkg)
+
+    # Instalar con privilegios de administrador (dialogo de contrasena nativo)
+    shell_cmd = "/usr/sbin/installer -pkg '" + pkg + "' -target /"
+    osa = 'do shell script "' + shell_cmd.replace('"', '\\"') + \
+          '" with administrator privileges'
+    r = subprocess.run(["osascript", "-e", osa], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(
+            "No se pudo instalar Python.\n" +
+            (r.stderr.strip() or "Instalacion cancelada o sin permisos."))
+
+    try:
+        os.remove(pkg)
+    except Exception:
+        pass
+
+    py = "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11"
+    if not Path(py).exists():
+        # Reintentar deteccion general
+        py = _find_python()
+    if not py or not Path(py).exists():
+        raise RuntimeError("Python se instalo pero no se encontro el ejecutable.")
+    return py
+
+def _install_ffmpeg(install_dir):
+    """Download a static native ffmpeg binary into <install_dir>/bin/ffmpeg."""
+    machine = platform.machine()
+    arch = "arm64" if machine == "arm64" else "x64"
+    url = ("https://github.com/eugeneware/ffmpeg-static/releases/"
+           "download/b6.0/ffmpeg-darwin-" + arch)
+    bin_dir = Path(install_dir) / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    target = bin_dir / "ffmpeg"
+
+    urllib.request.urlretrieve(url, str(target))
+    target.chmod(0o755)
+    # Quitar atributo de cuarentena para que se pueda ejecutar
+    subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(target)],
+                   capture_output=True)
+
+    # Verificar que se ejecuta
+    r = subprocess.run([str(target), "-version"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(
+            "ffmpeg se descargo pero no se pudo ejecutar:\n" +
+            (r.stderr or r.stdout)[:400] +
+            "\n\nInstala ffmpeg manualmente con: brew install ffmpeg")
+    return str(target)
 
 # ── Entry point (after all defs) ──────────────────────────────────────────────
 try:
@@ -405,6 +501,10 @@ assert "filter=" in content and "TypeError" in content, "no py<3.12 fallback"
 assert "except Exception as e:" in content, "no error handler"
 assert "_do_fresh_install" in content, "missing fresh install"
 assert "_do_update" in content, "missing update path"
+assert "_install_python" in content, "missing python auto-install"
+assert "_install_ffmpeg" in content, "missing ffmpeg auto-install"
+assert "ffmpeg-static" in content, "missing ffmpeg download url"
+assert "administrator privileges" in content, "missing admin install"
 assert "mlx-whisper" in content, "missing mlx-whisper"
 assert "python-docx" in content, "missing python-docx"
 assert "1.4" in content, "version not updated"

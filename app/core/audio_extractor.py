@@ -1,11 +1,15 @@
 import subprocess
 import shutil
 import os
+import wave
 from pathlib import Path
 from app.config import PROCESSED_DIR
 
-# Homebrew installs ffmpeg here depending on chip; .app bundles don't inherit PATH
+# ffmpeg lookup: bundled binary first (installer drops it in INSTALL_DIR/bin),
+# then Homebrew dirs. .app bundles don't inherit the shell PATH.
+_BUNDLED_BIN = str(Path(__file__).resolve().parents[2] / "bin")
 _EXTRA_PATHS = [
+    _BUNDLED_BIN,          # ffmpeg instalado por el instalador de VozMeet
     "/opt/homebrew/bin",   # Apple Silicon
     "/usr/local/bin",      # Intel
     "/usr/bin",
@@ -53,11 +57,22 @@ def extract_audio(input_path: str | Path, output_name: str | None = None) -> dic
 
 
 def _get_duration(wav_path: Path) -> float:
+    # The extracted file is always 16 kHz mono WAV — read duration with the
+    # stdlib `wave` module so we don't depend on ffprobe being installed.
+    try:
+        with wave.open(str(wav_path), "rb") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            if rate:
+                return frames / float(rate)
+    except Exception:
+        pass
+
+    # Fallback: ffprobe if available (handles odd containers)
     try:
         ffprobe = _find_bin("ffprobe")
     except RuntimeError:
         return 0.0
-
     cmd = [
         ffprobe, "-v", "quiet",
         "-print_format", "json",

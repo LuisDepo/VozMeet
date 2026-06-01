@@ -53,7 +53,8 @@ def _find_ffmpeg() -> str:
     found = shutil.which("ffmpeg")
     if found:
         return found
-    for p in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+    bundled = str(Path(__file__).resolve().parents[2] / "bin")
+    for p in [bundled, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
         candidate = os.path.join(p, "ffmpeg")
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
