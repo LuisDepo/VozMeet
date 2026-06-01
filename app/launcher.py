@@ -9,7 +9,8 @@ import urllib.error
 from pathlib import Path
 from app.version import VERSION
 
-_window = None  # pywebview window reference, set in main()
+_window = None          # pywebview window reference, set in main()
+_server_error = [None]  # captures server thread exception so main() can report it
 
 
 # ── Python API exposed to JavaScript via pywebview ────────────────────────────
@@ -150,24 +151,57 @@ def _on_closing():
 
 
 def start_server():
-    import sys as _sys
-    _base = str(Path(__file__).parent.parent)
-    if _base not in _sys.path:
-        _sys.path.insert(0, _base)
-    import uvicorn
-    from app.main import app as fastapi_app
-    uvicorn.run(fastapi_app, host="127.0.0.1", port=8765, log_level="warning")
+    try:
+        import sys as _sys
+        _base = str(Path(__file__).parent.parent)
+        if _base not in _sys.path:
+            _sys.path.insert(0, _base)
+        import uvicorn
+        from app.main import app as fastapi_app
+        uvicorn.run(fastapi_app, host="127.0.0.1", port=8765, log_level="warning")
+    except Exception as exc:
+        _server_error[0] = exc
 
 
-def wait_for_server(timeout: int = 30) -> bool:
+def wait_for_server(timeout: int = 60) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if _server_error[0] is not None:
+            return False
         try:
             urllib.request.urlopen("http://127.0.0.1:8765/api/health", timeout=1)
             return True
         except Exception:
             time.sleep(0.3)
     return False
+
+
+def _show_error_dialog(msg: str):
+    import subprocess
+    safe = msg.replace("\\", "\\\\").replace('"', '\\"')
+    # Truncate and put on one visual line for osascript safety
+    safe = safe[:500].replace("\n", " | ")
+    try:
+        subprocess.run(
+            ["osascript", "-e",
+             f'display dialog "VozMeet no pudo iniciarse:\\n\\n{safe}" '
+             f'buttons {{"OK"}} default button "OK" '
+             f'with title "VozMeet - Error" with icon stop'],
+            capture_output=True, timeout=30,
+        )
+    except Exception:
+        pass
+
+
+def _write_error_log(msg: str):
+    try:
+        import datetime
+        log_dir = Path.home() / "Library" / "Logs" / "VozMeet"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(str(log_dir / "error.log"), "a") as f:
+            f.write(f"\n[{datetime.datetime.now()}]\n{msg}\n")
+    except Exception:
+        pass
 
 
 def _free_port():
@@ -198,44 +232,59 @@ def _preload_whisper():
 def main():
     global _window
 
-    _configure_macos_app()
-    _free_port()
-
-    server_thread = threading.Thread(target=start_server, daemon=True)
-    server_thread.start()
-
-    if not wait_for_server(timeout=30):
-        print("Error: El servidor VozMeet no respondió a tiempo.", file=sys.stderr)
-        sys.exit(1)
-
-    # Preload Whisper model in background while user is looking at the upload screen
-    preload_thread = threading.Thread(target=_preload_whisper, daemon=True)
-    preload_thread.start()
-
     try:
-        import webview
-    except ImportError:
-        print(
-            "Error: pywebview no está instalado.\n"
-            "Ejecuta: pip install pywebview pyobjc-core pyobjc-framework-Cocoa",
-            file=sys.stderr,
+        _configure_macos_app()
+        _free_port()
+
+        server_thread = threading.Thread(target=start_server, daemon=True)
+        server_thread.start()
+
+        if not wait_for_server(timeout=60):
+            err = _server_error[0]
+            if err:
+                import traceback
+                tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))
+                _write_error_log(tb)
+                raise RuntimeError(f"Error iniciando el servidor:\n{err}")
+            else:
+                raise RuntimeError(
+                    "El servidor VozMeet no respondio en 60 segundos.\n"
+                    "Log de error: ~/Library/Logs/VozMeet/error.log"
+                )
+
+        preload_thread = threading.Thread(target=_preload_whisper, daemon=True)
+        preload_thread.start()
+
+        try:
+            import webview
+        except ImportError:
+            raise RuntimeError(
+                "pywebview no esta instalado.\n"
+                "Reinstala VozMeet con el instalador oficial."
+            )
+
+        api = VozMeetApi()
+        _window = webview.create_window(
+            "VozMeet",
+            "http://127.0.0.1:8765",
+            width=1100,
+            height=750,
+            min_size=(900, 600),
+            frameless=False,
+            js_api=api,
         )
+        _window.events.closing += _on_closing
+        webview.start()
+        sys.exit(0)
+
+    except SystemExit:
+        raise
+    except Exception as exc:
+        import traceback
+        full = traceback.format_exc()
+        _write_error_log(full)
+        _show_error_dialog(str(exc))
         sys.exit(1)
-
-    api = VozMeetApi()
-    _window = webview.create_window(
-        "VozMeet",
-        "http://127.0.0.1:8765",
-        width=1100,
-        height=750,
-        min_size=(900, 600),
-        frameless=False,
-        js_api=api,
-    )
-    _window.events.closing += _on_closing
-
-    webview.start()
-    sys.exit(0)
 
 
 if __name__ == "__main__":

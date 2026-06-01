@@ -62,36 +62,38 @@ print(f"tar.gz: {len(buf.getvalue())} bytes  b64: {len(TAR_B64)} chars")
 # ── 2. Python installer script ────────────────────────────────────────────────
 INSTALLER_PY = r'''#!/usr/bin/python3
 import base64, tarfile, io, os, stat, shutil, subprocess, sys, time, platform
-import urllib.request
+import urllib.request, threading, queue as _queue
 from pathlib import Path
+
+# ── Progress log (shared between threads) ────────────────────────────────────
+_log_queue = _queue.Queue()
+_install_error = [None]
+
+def _log(msg):
+    """Queue a progress message for the progress window."""
+    _log_queue.put(("log", msg))
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
 def _dialog(msg, title="VozMeet Installer", buttons=None):
     buttons = buttons or ["OK"]
-    btn_list = "{" + ", ".join(f'"{b}"' for b in buttons) + "}"
+    btn_list = "{" + ", ".join('"' + b + '"' for b in buttons) + "}"
     r = subprocess.run(
         ["osascript", "-e",
-         f'button returned of (display dialog "{_esc(msg)}" '
-         f'buttons {btn_list} default button "{buttons[-1]}" '
-         f'with title "{title}")'],
+         'button returned of (display dialog "' + _esc(msg) + '" '
+         'buttons ' + btn_list + ' default button "' + buttons[-1] + '" '
+         'with title "' + title + '")'],
         capture_output=True, text=True)
     return r.stdout.strip()
 
 def _ask(prompt, default="", title="VozMeet Installer"):
     r = subprocess.run(
         ["osascript", "-e",
-         f'text returned of (display dialog "{_esc(prompt)}" '
-         f'default answer "{_esc(default)}" '
-         f'buttons {{"Continuar"}} default button "Continuar" '
-         f'with title "{title}")'],
+         'text returned of (display dialog "' + _esc(prompt) + '" '
+         'default answer "' + _esc(default) + '" '
+         'buttons {"Continuar"} default button "Continuar" '
+         'with title "' + title + '")'],
         capture_output=True, text=True)
     return r.stdout.strip()
-
-def _notify(msg):
-    subprocess.run(
-        ["osascript", "-e",
-         f'display notification "{_esc(msg)}" with title "VozMeet Installer"'],
-        capture_output=True)
 
 def _esc(s):
     return s.replace('\\', '\\\\').replace('"', '\\"')
@@ -131,8 +133,7 @@ def _do_fresh_install():
     if btn == "Cancelar":
         sys.exit(0)
 
-    # ── Python 3.11+ (instalar automaticamente si falta) ─────────────────────
-    _notify("Buscando Python 3.11+...")
+    _log("Buscando Python 3.11+...")
     python_bin = _find_python()
     if not python_bin:
         b = _dialog(
@@ -146,32 +147,27 @@ def _do_fresh_install():
             sys.exit(0)
         python_bin = _install_python()
 
-    # ── Crear directorio y extraer archivos ──────────────────────────────────
-    _notify("Creando directorio de instalacion...")
+    _log("Creando directorio de instalacion...")
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
     os.chdir(str(INSTALL_DIR))
-    _notify("Extrayendo archivos de VozMeet...")
+    _log("Extrayendo archivos de VozMeet...")
     _extract(B64, str(INSTALL_DIR))
 
-    # ── ffmpeg (descargar binario estatico si falta) ─────────────────────────
-    _notify("Verificando ffmpeg...")
+    _log("Verificando ffmpeg...")
     if not _find_ffmpeg_path():
-        _notify("Descargando ffmpeg...")
+        _log("Descargando ffmpeg (~45 MB)...")
         _install_ffmpeg(INSTALL_DIR)
+        _log("ffmpeg instalado.")
 
-    # ── Crear entorno virtual ─────────────────────────────────────────────────
-    _notify("Creando entorno virtual Python...")
+    _log("Creando entorno virtual Python...")
     r = _run([python_bin, "-m", "venv", str(INSTALL_DIR / ".venv")])
     if r.returncode != 0:
         raise RuntimeError("No se pudo crear el entorno virtual:\n" + r.stderr)
 
-    # ── Instalar dependencias ─────────────────────────────────────────────────
-    _notify("Actualizando pip...")
+    _log("Actualizando pip...")
     _run([VENV_PIP, "install", "--upgrade", "pip", "--quiet"])
 
-    # Las dependencias mlx-* solo existen en Apple Silicon; se instalan aparte
-    # para que en Intel no fallen y aborten toda la instalacion.
-    _notify("Instalando dependencias (puede tardar 20-40 min)...")
+    _log("Instalando dependencias (puede tardar 20-40 min)...")
     reqs_path = INSTALL_DIR / "requirements.txt"
     all_lines = [l for l in reqs_path.read_text().splitlines() if l.strip()]
     core_lines = [l for l in all_lines if "mlx" not in l.lower()]
@@ -183,18 +179,19 @@ def _do_fresh_install():
     core_req.unlink(missing_ok=True)
     if r.returncode != 0:
         raise RuntimeError("Error instalando dependencias:\n" + r.stderr[-1000:])
+    _log("Dependencias instaladas.")
 
-    # mlx (aceleracion Apple Silicon) — no fatal si falla (p.ej. en Intel)
     if platform.machine() == "arm64":
-        _notify("Instalando aceleracion Apple Silicon (mlx)...")
+        _log("Instalando aceleracion Apple Silicon (mlx)...")
         for dep in mlx_lines:
             try:
+                _log("  -> " + dep)
                 _run([VENV_PIP, "install", "--quiet", dep], timeout=600)
             except Exception:
                 pass
+        _log("Aceleracion mlx lista.")
 
-    # ── Token HuggingFace ─────────────────────────────────────────────────────
-    _notify("Configurando HuggingFace...")
+    _log("Configurando HuggingFace...")
     token = _ask(
         "Ingresa tu token de HuggingFace (gratuito).\n\n"
         "Si no tienes uno:\n"
@@ -208,21 +205,21 @@ def _do_fresh_install():
         title="VozMeet - Token HuggingFace")
     env_path = INSTALL_DIR / ".env"
     if token and token != "tu_token_aqui":
-        env_path.write_text(f"HF_TOKEN={token}\n")
+        env_path.write_text("HF_TOKEN=" + token + "\n")
     else:
         shutil.copy2(str(INSTALL_DIR / ".env.example"), str(env_path))
+    _log("Configuracion guardada.")
 
-    # ── Inicializar base de datos ─────────────────────────────────────────────
-    _notify("Inicializando base de datos...")
+    _log("Inicializando base de datos...")
     for d in ["data/uploads", "data/processed", "data/transcripts", "data/voice_samples"]:
         (INSTALL_DIR / d).mkdir(parents=True, exist_ok=True)
     _run([VENV_PY, "-c",
           "import sys; sys.path.insert(0,'.'); from app.database.db import init_db; init_db()"],
          timeout=30)
 
-    # ── Construir y copiar .app ───────────────────────────────────────────────
-    _notify("Construyendo VozMeet.app...")
+    _log("Construyendo VozMeet.app...")
     _build_app()
+    _log("VozMeet.app copiado a /Applications.")
 
     _dialog(
         "VozMeet v1.4 instalado correctamente.\n\n"
@@ -233,9 +230,8 @@ def _do_fresh_install():
 
 # ── Update ────────────────────────────────────────────────────────────────────
 def _do_update():
-    _notify("Actualizando VozMeet a v1.4...")
+    _log("Actualizando VozMeet a v1.4...")
 
-    # Kill puerto 8765
     try:
         r = _run(["lsof", "-ti", "tcp:8765"])
         if r.returncode == 0 and r.stdout.strip():
@@ -247,27 +243,28 @@ def _do_update():
         pass
 
     os.chdir(str(INSTALL_DIR))
+    _log("Extrayendo archivos actualizados...")
     _extract(B64, str(INSTALL_DIR))
 
-    # Asegurar ffmpeg (por si el equipo no lo tiene en PATH)
     if not _find_ffmpeg_path():
-        _notify("Descargando ffmpeg...")
+        _log("Descargando ffmpeg...")
         try:
             _install_ffmpeg(INSTALL_DIR)
         except Exception:
             pass
 
-    _notify("Instalando dependencias nuevas...")
+    _log("Instalando dependencias nuevas...")
     deps = ["python-docx>=1.1.0"]
     if platform.machine() == "arm64":
         deps += ["mlx-whisper>=0.4.0", "mlx-lm>=0.20.0"]
     for dep in deps:
         try:
+            _log("  -> " + dep)
             _run([VENV_PIP, "install", "--quiet", "--upgrade", dep], timeout=600)
         except Exception:
             pass
 
-    _notify("Actualizando VozMeet.app...")
+    _log("Actualizando VozMeet.app...")
     _build_app()
 
     _dialog(
@@ -343,7 +340,6 @@ def _find_python():
             r = subprocess.run([p, "--version"], capture_output=True, text=True)
             if r.returncode == 0:
                 return p
-    # Check system python3
     for py in ["python3.11", "python3.12", "python3.13", "python3"]:
         r = subprocess.run(["which", py], capture_output=True, text=True)
         if r.returncode == 0 and r.stdout.strip():
@@ -359,7 +355,6 @@ def _find_python():
     return None
 
 def _find_ffmpeg_path():
-    """Return a path to a working ffmpeg, or None. Searches PATH + common dirs."""
     found = shutil.which("ffmpeg")
     if found:
         return found
@@ -375,16 +370,15 @@ def _find_ffmpeg_path():
     return None
 
 def _install_python():
-    """Download and install the official python.org universal2 package."""
     url = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg"
     pkg = "/tmp/vozmeet_python-3.11.9.pkg"
-    _notify("Descargando Python 3.11.9 (~45 MB)...")
+    _log("Descargando Python 3.11.9 (~45 MB)...")
     urllib.request.urlretrieve(url, pkg)
 
-    # Instalar con privilegios de administrador (dialogo de contrasena nativo)
     shell_cmd = "/usr/sbin/installer -pkg '" + pkg + "' -target /"
     osa = 'do shell script "' + shell_cmd.replace('"', '\\"') + \
           '" with administrator privileges'
+    _log("Instalando Python (solicita contrasena de Mac)...")
     r = subprocess.run(["osascript", "-e", osa], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(
@@ -398,14 +392,13 @@ def _install_python():
 
     py = "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11"
     if not Path(py).exists():
-        # Reintentar deteccion general
         py = _find_python()
     if not py or not Path(py).exists():
         raise RuntimeError("Python se instalo pero no se encontro el ejecutable.")
+    _log("Python 3.11 instalado.")
     return py
 
 def _install_ffmpeg(install_dir):
-    """Download a static native ffmpeg binary into <install_dir>/bin/ffmpeg."""
     machine = platform.machine()
     arch = "arm64" if machine == "arm64" else "x64"
     url = ("https://github.com/eugeneware/ffmpeg-static/releases/"
@@ -416,11 +409,9 @@ def _install_ffmpeg(install_dir):
 
     urllib.request.urlretrieve(url, str(target))
     target.chmod(0o755)
-    # Quitar atributo de cuarentena para que se pueda ejecutar
     subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(target)],
                    capture_output=True)
 
-    # Verificar que se ejecuta
     r = subprocess.run([str(target), "-version"], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(
@@ -429,19 +420,116 @@ def _install_ffmpeg(install_dir):
             "\n\nInstala ffmpeg manualmente con: brew install ffmpeg")
     return str(target)
 
-# ── Entry point (after all defs) ──────────────────────────────────────────────
-try:
-    fresh = not INSTALL_DIR.exists() or not Path(VENV_PY).exists()
-    if fresh:
-        _do_fresh_install()
-    else:
-        _do_update()
-except Exception as e:
-    _dialog(
-        "Error durante la instalacion:\n\n" + str(e) +
-        "\n\nCaptura este mensaje y reportalo.",
-        "VozMeet Installer - Error")
-    sys.exit(1)
+# ── Background installer thread ───────────────────────────────────────────────
+def _run_installer_bg():
+    """All installation logic runs here so the progress window stays responsive."""
+    try:
+        fresh = not INSTALL_DIR.exists() or not Path(VENV_PY).exists()
+        if fresh:
+            _do_fresh_install()
+        else:
+            _do_update()
+        _log_queue.put(("done", None))
+    except SystemExit:
+        _log_queue.put(("cancelled", None))
+    except Exception as e:
+        import traceback
+        _install_error[0] = traceback.format_exc()
+        _log_queue.put(("error", str(e)))
+
+# ── Persistent progress window (main thread) ──────────────────────────────────
+def _show_progress_window():
+    """Show a tkinter progress window and run the installer in a background thread."""
+    try:
+        import tkinter as tk
+        from tkinter.scrolledtext import ScrolledText
+        _has_tk = True
+    except ImportError:
+        _has_tk = False
+
+    if not _has_tk:
+        # Fallback: no window, run directly
+        _run_installer_bg()
+        if _install_error[0]:
+            _dialog("Error durante la instalacion:\n\n" +
+                    (_install_error[0] or "")[:400] +
+                    "\n\nCaptura este mensaje y reportalo.",
+                    "VozMeet Installer - Error")
+        return
+
+    root = tk.Tk()
+    root.title("VozMeet Installer")
+    root.geometry("560x420")
+    root.resizable(False, True)
+    root.configure(bg="#1a1a1a")
+    root.protocol("WM_DELETE_WINDOW", lambda: None)  # locked until done
+
+    tk.Label(root,
+             text="VozMeet Installer",
+             font=("Helvetica Neue", 16, "bold"),
+             fg="#ffffff", bg="#1a1a1a").pack(pady=(16, 2))
+
+    status_var = tk.StringVar(value="Iniciando...")
+    tk.Label(root,
+             textvariable=status_var,
+             font=("Helvetica Neue", 11),
+             fg="#888888", bg="#1a1a1a").pack(pady=(0, 10))
+
+    txt = ScrolledText(root,
+                       wrap=tk.WORD,
+                       font=("Menlo", 10),
+                       bg="#2b2b2b", fg="#d4d4d4",
+                       state=tk.DISABLED,
+                       relief=tk.FLAT,
+                       padx=8, pady=6)
+    txt.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
+
+    _state = {"done": False}
+
+    def poll():
+        while True:
+            try:
+                kind, msg = _log_queue.get_nowait()
+                txt.configure(state=tk.NORMAL)
+                if kind == "log":
+                    txt.insert(tk.END, " -> " + msg + "\n")
+                    status_var.set(msg[:70])
+                elif kind == "done":
+                    txt.insert(tk.END, "\n [OK] Instalacion completada exitosamente.\n")
+                    status_var.set("Completado — puedes cerrar esta ventana")
+                    root.protocol("WM_DELETE_WINDOW", root.destroy)
+                    _state["done"] = True
+                elif kind == "cancelled":
+                    _state["done"] = True
+                elif kind == "error":
+                    txt.insert(tk.END, "\n [ERROR] " + (msg or "") + "\n")
+                    status_var.set("Error durante la instalacion")
+                    root.protocol("WM_DELETE_WINDOW", root.destroy)
+                    _state["done"] = True
+                txt.configure(state=tk.DISABLED)
+                txt.see(tk.END)
+            except Exception:
+                break
+        if not _state["done"]:
+            root.after(200, poll)
+        else:
+            root.after(3000, root.destroy)
+
+    root.after(300, poll)
+
+    t = threading.Thread(target=_run_installer_bg, daemon=True)
+    t.start()
+
+    root.mainloop()
+
+    if _install_error[0]:
+        _dialog("Error durante la instalacion:\n\n" +
+                (_install_error[0] or "")[:400] +
+                "\n\nCaptura este mensaje y reportalo.",
+                "VozMeet Installer - Error")
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+_show_progress_window()
 '''
 
 installer_py = INSTALLER_PY.replace("TAR_B64_PLACEHOLDER", TAR_B64)
@@ -498,7 +586,6 @@ content = exe.read_text()
 assert content.startswith("#!/usr/bin/python3"), "bad shebang"
 assert "TAR_B64_PLACEHOLDER" not in content, "placeholder not replaced"
 assert "filter=" in content and "TypeError" in content, "no py<3.12 fallback"
-assert "except Exception as e:" in content, "no error handler"
 assert "_do_fresh_install" in content, "missing fresh install"
 assert "_do_update" in content, "missing update path"
 assert "_install_python" in content, "missing python auto-install"
@@ -508,6 +595,9 @@ assert "administrator privileges" in content, "missing admin install"
 assert "mlx-whisper" in content, "missing mlx-whisper"
 assert "python-docx" in content, "missing python-docx"
 assert "1.4" in content, "version not updated"
+assert "_show_progress_window" in content, "missing progress window"
+assert "tkinter" in content, "missing tkinter"
+assert "_run_installer_bg" in content, "missing background thread"
 print("Content checks: OK")
 
 # ── Zip ───────────────────────────────────────────────────────────────────────
