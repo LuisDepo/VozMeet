@@ -1,6 +1,9 @@
 from pathlib import Path
 from typing import Optional, Callable
-from app.config import WHISPER_MODEL, WHISPER_COMPUTE_TYPE, WHISPER_DEVICE, MLX_WHISPER_REPO
+from app.config import (
+    WHISPER_MODEL, WHISPER_COMPUTE_TYPE, WHISPER_DEVICE, MLX_WHISPER_REPO,
+    mlx_disabled,
+)
 
 _model = None
 _backend = None  # "mlx" or "faster_whisper"
@@ -28,14 +31,12 @@ def is_loaded() -> bool:
 def _get_model():
     global _model, _backend
     if _model is None:
-        # .mlx_disabled is written by the installer (or the preload subprocess) when
-        # import mlx.core causes a SIGABRT on this machine (e.g. M1 Metal init crash).
-        # A SIGABRT in a background thread kills the entire process — no error dialog,
-        # no exception, just a blank window that closes. Skipping mlx entirely is the
-        # correct fix; faster-whisper works on all Macs.
-        _mlx_disabled = (Path(__file__).parent.parent / ".mlx_disabled").exists()
-
-        if not _mlx_disabled:
+        # mlx is skipped when config.mlx_disabled() is true — set by the installer
+        # (or the heavy-stage CPU fallback) when mlx's Metal init/compute crashes
+        # on this machine (e.g. some M1 configs). A Metal SIGABRT can't be caught
+        # in-process, so we avoid it entirely and use faster-whisper, which works
+        # on every Mac.
+        if not mlx_disabled():
             try:
                 _t("import mlx_whisper")
                 import mlx_whisper  # noqa: F401
@@ -48,9 +49,10 @@ def _get_model():
             except Exception as e:
                 _t("mlx unavailable (" + repr(e) + "), falling back to faster_whisper")
         else:
-            _t("mlx disabled (.mlx_disabled flag) — using faster_whisper directly")
+            _t("mlx disabled for this machine — using faster_whisper directly")
 
         if _model is None:
+            import os
             _t("import faster_whisper")
             from faster_whisper import WhisperModel
             device = WHISPER_DEVICE
@@ -60,8 +62,13 @@ def _get_model():
                     device = "cuda" if torch.cuda.is_available() else "cpu"
                 except ImportError:
                     device = "cpu"
-            _t("creating WhisperModel device=" + device)
-            _model = WhisperModel(WHISPER_MODEL, device=device, compute_type=WHISPER_COMPUTE_TYPE)
+            # Use every CPU core so the int8 model runs as fast as the machine allows.
+            cpu_threads = os.cpu_count() or 4
+            _t("creating WhisperModel device=" + device + " cpu_threads=" + str(cpu_threads))
+            _model = WhisperModel(
+                WHISPER_MODEL, device=device,
+                compute_type=WHISPER_COMPUTE_TYPE, cpu_threads=cpu_threads,
+            )
             _backend = "faster_whisper"
         _t("backend selected: " + str(_backend))
     return _model
@@ -81,14 +88,50 @@ def transcribe(
         return _transcribe_faster_whisper(audio_path, language, progress_cb, model)
 
 
+def _load_wav_f32(path: str):
+    """Load a 16 kHz mono PCM WAV (what audio_extractor always produces) into a
+    float32 numpy array in [-1, 1]. Returns None for unexpected formats so the
+    caller can fall back to letting mlx decode via ffmpeg."""
+    import wave
+    import numpy as np
+    try:
+        with wave.open(path, "rb") as wf:
+            ch, sw, sr, n = (wf.getnchannels(), wf.getsampwidth(),
+                             wf.getframerate(), wf.getnframes())
+            raw = wf.readframes(n)
+        if sr != 16000:
+            return None
+        if sw == 2:
+            a = np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0
+        elif sw == 4:
+            a = np.frombuffer(raw, np.int32).astype(np.float32) / 2147483648.0
+        elif sw == 1:
+            a = (np.frombuffer(raw, np.uint8).astype(np.float32) - 128.0) / 128.0
+        else:
+            return None
+        if ch > 1:
+            a = a.reshape(-1, ch).mean(axis=1)
+        return np.ascontiguousarray(a, dtype=np.float32)
+    except Exception:
+        return None
+
+
 def _transcribe_mlx(audio_path, language, progress_cb, repo):
     import mlx_whisper
 
-    kwargs = {"path_or_hf_repo": repo, "word_timestamps": False}
+    kwargs = {"path_or_hf_repo": repo, "word_timestamps": False, "verbose": False}
     if language:
         kwargs["language"] = language
 
-    result = mlx_whisper.transcribe(audio_path, **kwargs)
+    # Feed mlx a preloaded float32 array instead of the path. This avoids
+    # mlx_whisper.load_audio() shelling out to the bare `ffmpeg` binary (which
+    # fails inside a .app bundle that lacks ffmpeg on PATH) and skips a redundant
+    # full-file decode. Falls back to the path if the WAV isn't the expected form.
+    audio_input = _load_wav_f32(audio_path)
+    if audio_input is None:
+        audio_input = audio_path
+
+    result = mlx_whisper.transcribe(audio_input, **kwargs)
 
     raw_segments = result.get("segments", [])
     lang = result.get("language", "es")

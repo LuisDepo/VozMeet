@@ -1,5 +1,5 @@
 from pathlib import Path
-from app.config import PYANNOTE_MODEL, HF_TOKEN
+from app.config import PYANNOTE_MODEL, HF_TOKEN, mps_disabled
 
 _pipeline = None
 
@@ -19,8 +19,10 @@ def _get_pipeline():
                 PYANNOTE_MODEL,
                 token=HF_TOKEN,
             )
-            # Use Apple Silicon GPU (MPS) if available — 3-5x faster than CPU
-            if torch.backends.mps.is_available():
+            # Use Apple Silicon GPU (MPS) if available — 3-5x faster than CPU.
+            # Skip it when mps_disabled() is set (some M1 configs SIGABRT in Metal);
+            # CPU diarization is reliable everywhere.
+            if torch.backends.mps.is_available() and not mps_disabled():
                 _pipeline.to(torch.device("mps"))
             elif torch.cuda.is_available():
                 _pipeline.to(torch.device("cuda"))

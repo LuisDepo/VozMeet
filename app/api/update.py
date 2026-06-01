@@ -9,20 +9,24 @@ from app.logger import get_logger
 router = APIRouter()
 log = get_logger("update")
 
-GITHUB_ZIP = "https://github.com/luisdepo/vozmeet/archive/refs/heads/main.zip"
+# The working build lives on this branch; the in-app updater pulls from it so
+# the Update button delivers the same code as the installer .zip.
+UPDATE_BRANCH = "claude/vozmeet-macos-app-EOB7u"
+GITHUB_ZIP = f"https://github.com/luisdepo/vozmeet/archive/refs/heads/{UPDATE_BRANCH}.zip"
 from app.version import VERSION as CURRENT_VERSION
 
 
 @router.get("/update/check")
 def check_update():
     try:
-        url = "https://raw.githubusercontent.com/luisdepo/vozmeet/main/app/launcher.py"
+        url = ("https://raw.githubusercontent.com/luisdepo/vozmeet/"
+               f"{UPDATE_BRANCH}/app/version.py")
         req = urllib.request.Request(url, headers={"User-Agent": "VozMeet"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             content = resp.read().decode()
         remote_version = CURRENT_VERSION
         for line in content.splitlines():
-            if 'return "' in line and "get_version" not in line and "def " not in line:
+            if line.strip().startswith("VERSION") and '"' in line:
                 parts = line.split('"')
                 if len(parts) >= 2:
                     remote_version = parts[1]
@@ -82,6 +86,16 @@ def install_update():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(item), str(dst))
 
+        # Keep requirements.txt in sync (used by the installer / future repairs).
+        src_reqs = src_root / "requirements.txt"
+        if src_reqs.exists():
+            shutil.copy2(str(src_reqs), str(project_root / "requirements.txt"))
+
+        # Re-evaluate Metal/mlx + MPS compatibility for THIS machine and persist
+        # the disable-flags. Runs in subprocesses so a Metal crash can't take down
+        # the running app, and so the freshly-copied code path is exercised.
+        _reconfigure_accelerators(project_root)
+
         shutil.rmtree(tmp, ignore_errors=True)
         log.info("Update: completed successfully")
         return {"ok": True, "message": "Actualización completada. Reinicia para aplicar los cambios."}
@@ -89,3 +103,46 @@ def install_update():
     except Exception as e:
         log.exception("Update install failed")
         return {"ok": False, "error": str(e)}
+
+
+def _reconfigure_accelerators(project_root: Path):
+    """Probe mlx (Metal) and torch MPS in throwaway subprocesses and write/clear
+    the .mlx_disabled / .mps_disabled flags accordingly. A subprocess SIGABRT is
+    confined to the child, so this is safe to run inside the live app."""
+    import sys
+    import platform
+    import subprocess
+
+    if platform.machine() != "arm64":
+        return  # Intel: no Metal/mlx/MPS to probe
+
+    def _probe(code: str) -> bool:
+        try:
+            r = subprocess.run([sys.executable, "-c", code],
+                               capture_output=True, text=True, timeout=60)
+            return r.returncode == 0 and "OK" in r.stdout
+        except Exception:
+            return False
+
+    mlx_flag = project_root / ".mlx_disabled"
+    mps_flag = project_root / ".mps_disabled"
+
+    # Real compute, not just import — catches configs that import fine but abort
+    # on the first Metal kernel.
+    mlx_ok = _probe("import mlx.core as mx; "
+                    "x=mx.ones((64,64)); mx.eval(x@x); print('OK')")
+    mps_ok = _probe("import torch; "
+                    "x=torch.ones(64,64,device='mps'); _=(x@x).cpu(); print('OK')")
+
+    try:
+        if mlx_ok:
+            mlx_flag.unlink(missing_ok=True)
+        else:
+            mlx_flag.write_text("mlx Metal compute test failed\n")
+        if mps_ok:
+            mps_flag.unlink(missing_ok=True)
+        else:
+            mps_flag.write_text("torch MPS compute test failed\n")
+        log.info("Update: accelerator probe — mlx_ok=%s mps_ok=%s", mlx_ok, mps_ok)
+    except Exception:
+        log.warning("Update: could not write accelerator flags")

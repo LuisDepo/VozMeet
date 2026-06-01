@@ -23,6 +23,7 @@ FILES = [
     "app/core/audio_extractor.py",
     "app/core/diarizer.py",
     "app/core/embedder.py",
+    "app/core/heavy_worker.py",
     "app/core/merger.py",
     "app/core/pipeline.py",
     "app/core/summarizer.py",
@@ -118,7 +119,7 @@ B64 = "TAR_B64_PLACEHOLDER"
 # ── Fresh install ─────────────────────────────────────────────────────────────
 def _do_fresh_install():
     btn = _dialog(
-        "Bienvenido al instalador de VozMeet v1.4\n\n"
+        "Bienvenido al instalador de VozMeet v1.5\n\n"
         "Esto instalara VozMeet en:\n" + str(INSTALL_DIR) + "\n\n"
         "El instalador descargara e instalara TODO lo necesario\n"
         "automaticamente (Python, ffmpeg, modelos de IA).\n\n"
@@ -192,7 +193,7 @@ def _do_fresh_install():
     _log("VozMeet.app copiado a /Applications.")
 
     _dialog(
-        "VozMeet v1.4 instalado correctamente.\n\n"
+        "VozMeet v1.5 instalado correctamente.\n\n"
         + ("" if token else
            "PENDIENTE: Configura tu token HuggingFace\nen el archivo .env antes de usar.\n\n") +
         "Abre VozMeet desde la carpeta Aplicaciones.",
@@ -200,7 +201,7 @@ def _do_fresh_install():
 
 # ── Update ────────────────────────────────────────────────────────────────────
 def _do_update():
-    _log("Actualizando VozMeet a v1.4...")
+    _log("Actualizando VozMeet a v1.5...")
 
     try:
         r = _run(["lsof", "-ti", "tcp:8765"])
@@ -288,12 +289,12 @@ def _do_update():
     _build_app()
 
     _dialog(
-        "VozMeet v1.4 actualizado correctamente.\n\n"
+        "VozMeet v1.5 actualizado correctamente.\n\n"
         "Novedades:\n"
-        "- Modelo medium + mlx-whisper (mas rapido en M1/M2/M3)\n"
-        "- Exportar a Word (.docx)\n"
-        "- Dialogo para elegir donde guardar\n"
-        "- Resumen de reunion con IA local\n\n"
+        "- Procesamiento aislado: la app ya no se cierra durante el analisis\n"
+        "- Aceleracion automatica segun tu Mac (M1/M2/M3/M4/Intel)\n"
+        "- Correccion del error 'ffmpeg' al transcribir con mlx\n"
+        "- Transcripcion mas rapida (sin re-decodificar el audio)\n\n"
         "Abre VozMeet desde la carpeta Aplicaciones.",
         "Actualizacion completada")
 
@@ -333,28 +334,46 @@ def _create_venv_and_install(python_bin):
         _log("Aceleracion mlx lista.")
         _test_and_configure_mlx()
 
-# ── Shared: test Metal / mlx compatibility ───────────────────────────────────
+# ── Shared: test Metal / mlx + torch MPS compatibility ───────────────────────
 def _test_and_configure_mlx():
-    """Run import mlx.core in an isolated subprocess.
+    """Probe the Metal accelerators with REAL compute (not just import) in
+    isolated subprocesses, then write/clear .mlx_disabled and .mps_disabled.
 
-    On some M1 configurations, Metal initialisation calls abort() (SIGABRT).
-    A SIGABRT inside any Python thread kills the entire app silently.
-    We run the test in a subprocess so a crash only kills the child.
-    If it crashes we write .mlx_disabled — the transcriber then skips
-    mlx and goes straight to faster-whisper, which works on every Mac."""
+    Some M1 configs import mlx.core fine but abort() (SIGABRT) on the first
+    Metal kernel — and a SIGABRT in any thread kills the whole app silently.
+    Running an actual matmul in a subprocess catches that here, at install time,
+    so the app picks the fastest backend that is STABLE on this exact machine:
+      - working Metal  -> mlx (Neural Engine) for transcription, MPS for diarization
+      - broken Metal   -> faster-whisper + CPU diarization (reliable everywhere)."""
     if platform.machine() != "arm64":
-        return
-    _log("Verificando compatibilidad Metal/mlx en este Mac...")
-    r = _run([VENV_PY, "-c", "import mlx.core; print('mlx_metal_ok')"], timeout=30)
-    disabled = INSTALL_DIR / ".mlx_disabled"
-    if r.returncode == 0 and "mlx_metal_ok" in r.stdout:
-        _log("Metal/mlx compatible — aceleracion Neural Engine activa.")
-        if disabled.exists():
-            disabled.unlink(missing_ok=True)
+        return  # Intel: no mlx / MPS
+
+    _log("Verificando aceleracion Metal en este Mac (mlx + MPS)...")
+    mlx_flag = INSTALL_DIR / ".mlx_disabled"
+    mps_flag = INSTALL_DIR / ".mps_disabled"
+
+    def _probe(code):
+        r = _run([VENV_PY, "-c", code], timeout=60)
+        return r.returncode == 0 and "OK" in r.stdout, r.returncode
+
+    mlx_ok, mlx_rc = _probe(
+        "import mlx.core as mx; x=mx.ones((64,64)); mx.eval(x@x); print('OK')")
+    if mlx_ok:
+        _log("mlx (Neural Engine) compatible — transcripcion acelerada activa.")
+        mlx_flag.unlink(missing_ok=True)
     else:
-        _log("Metal/mlx no compatible en este Mac (rc=" + str(r.returncode) +
-             "). Usando faster-whisper (igual de preciso, solo mas lento).")
-        disabled.write_text("Crash rc=" + str(r.returncode) + "\n")
+        _log("mlx no estable aqui (rc=" + str(mlx_rc) +
+             "). Usando faster-whisper (igual de preciso).")
+        mlx_flag.write_text("mlx Metal compute test failed rc=" + str(mlx_rc) + "\n")
+
+    mps_ok, mps_rc = _probe(
+        "import torch; x=torch.ones(64,64,device='mps'); _=(x@x).cpu(); print('OK')")
+    if mps_ok:
+        _log("torch MPS compatible — diarizacion acelerada activa.")
+        mps_flag.unlink(missing_ok=True)
+    else:
+        _log("MPS no estable aqui (rc=" + str(mps_rc) + "). Diarizacion en CPU.")
+        mps_flag.write_text("torch MPS compute test failed rc=" + str(mps_rc) + "\n")
 
 # ── Shared: build VozMeet.app ─────────────────────────────────────────────────
 def _build_app():
@@ -384,7 +403,7 @@ def _build_app():
         '  <key>CFBundleName</key>          <string>VozMeet</string>\n'
         '  <key>CFBundleDisplayName</key>   <string>VozMeet</string>\n'
         '  <key>CFBundleIdentifier</key>    <string>com.bms.vozmeet</string>\n'
-        '  <key>CFBundleVersion</key>       <string>1.4</string>\n'
+        '  <key>CFBundleVersion</key>       <string>1.5</string>\n'
         '  <key>CFBundleExecutable</key>    <string>VozMeet</string>\n'
         '  <key>CFBundleIconFile</key>      <string>VozMeet</string>\n'
         '  <key>NSHighResolutionCapable</key><true/>\n'
@@ -682,7 +701,7 @@ exe.chmod(exe.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     '  <key>CFBundleName</key>          <string>VozMeet Installer</string>\n'
     '  <key>CFBundleDisplayName</key>   <string>VozMeet Installer</string>\n'
     '  <key>CFBundleIdentifier</key>    <string>com.bms.vozmeet.installer</string>\n'
-    '  <key>CFBundleVersion</key>       <string>1.4</string>\n'
+    '  <key>CFBundleVersion</key>       <string>1.5</string>\n'
     '  <key>CFBundleExecutable</key>    <string>VozMeet-Installer</string>\n'
     '  <key>CFBundleIconFile</key>      <string>VozMeet</string>\n'
     '  <key>CFBundleIconName</key>      <string>VozMeet</string>\n'
@@ -705,9 +724,11 @@ assert "administrator privileges" in content, "missing admin install"
 assert "mlx-whisper" in content, "missing mlx-whisper"
 assert "python-docx" in content, "missing python-docx"
 assert "_test_and_configure_mlx" in content, "missing mlx Metal compatibility test"
-assert "mlx_metal_ok" in content, "missing mlx_metal_ok check"
+assert "mx.eval" in content, "mlx test must run real compute, not just import"
+assert "device='mps'" in content, "missing torch MPS compatibility test"
 assert ".mlx_disabled" in content, "missing mlx_disabled flag"
-assert "1.4" in content, "version not updated"
+assert ".mps_disabled" in content, "missing mps_disabled flag"
+assert "1.5" in content, "version not updated"
 assert "_show_progress_window" in content, "missing progress window"
 assert "tkinter" in content, "missing tkinter"
 assert "_run_installer_bg" in content, "missing background thread"

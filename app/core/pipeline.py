@@ -84,8 +84,7 @@ def _pipeline_worker(recording_id: int, file_path: str):
 
 def _execute_pipeline(recording_id: int, file_path: str):
     from app.core.audio_extractor import extract_audio
-    from app.core.transcriber import transcribe, is_loaded as whisper_is_loaded
-    from app.core.diarizer import diarize
+    from app.core.transcriber import is_loaded as whisper_is_loaded
     from app.core.embedder import get_embedding, extract_sample
     from app.core.merger import merge
 
@@ -122,26 +121,34 @@ def _execute_pipeline(recording_id: int, file_path: str):
     if duration < MIN_AUDIO_DURATION_SECONDS:
         _notify(recording_id, 9, "Advertencia", f"Audio corto ({duration:.1f}s). Procesando igualmente.")
 
-    # ── Stages 2+3: Transcription AND Diarization in parallel ────────────────
-    import concurrent.futures
-
+    # ── Stages 2+3: Transcription AND Diarization (isolated subprocess) ──────
+    # Both touch Metal/C-extensions that can abort() the whole process on some
+    # machines (e.g. certain M1 configs). Running them in a child process keeps
+    # a crash from killing the app; on a hard crash we disable the accelerators
+    # and retry on CPU automatically.
     whisper_hint = (
         "Transcribiendo y separando voces en paralelo..." if whisper_is_loaded()
         else "Cargando Whisper (30-60s) · separando voces en paralelo..."
     )
     _notify(recording_id, 10, "Procesando audio", whisper_hint)
-    log.info("[%d] Starting transcription + diarization in parallel", recording_id)
+    log.info("[%d] Starting transcription + diarization (isolated)", recording_id)
 
     def _transcription_progress(frac: float):
         pct = 10 + int(frac * 55)  # 10% → 65%
         _notify(recording_id, pct, "Transcribiendo",
                 f"{int(frac * 100)}% · {_fmt_duration(frac * duration)} / {_fmt_duration(duration)}")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        future_transcript = executor.submit(transcribe, wav_path, None, _transcription_progress)
-        future_diarize = executor.submit(diarize, wav_path)
-        transcript_result = future_transcript.result()
-        diarization_segments = future_diarize.result()
+    try:
+        transcript_result, diarization_segments = _run_heavy_stage(
+            recording_id, wav_path, _transcription_progress, cpu_only=False)
+    except _AcceleratorCrash as crash:
+        log.error("[%d] Heavy stage crashed (rc=%s) — disabling Metal accelerators, "
+                  "retrying on CPU.\n%s", recording_id, crash.returncode, crash.tail)
+        _disable_accelerators()
+        _notify(recording_id, 10, "Optimizando para este equipo",
+                "Reintentando en modo CPU (compatible con cualquier Mac)...")
+        transcript_result, diarization_segments = _run_heavy_stage(
+            recording_id, wav_path, _transcription_progress, cpu_only=True)
 
     transcript_segments = transcript_result["segments"]
     language = transcript_result["language"]
@@ -269,6 +276,88 @@ def _execute_pipeline(recording_id: int, file_path: str):
 
     log.info("[%d] Pipeline completed successfully", recording_id)
     _notify(recording_id, 100, "Listo para identificación", "Análisis completado")
+
+
+class _AcceleratorCrash(Exception):
+    """Raised when the heavy-stage subprocess is killed by a signal (e.g. a
+    Metal/C-extension SIGABRT), as opposed to a normal Python error."""
+
+    def __init__(self, returncode: int, tail: str):
+        super().__init__(f"heavy stage killed (rc={returncode})")
+        self.returncode = returncode
+        self.tail = tail
+
+
+def _disable_accelerators():
+    """Persist flags so transcription (mlx) and diarization (MPS) avoid Metal on
+    this machine from now on. The data dir is never touched."""
+    from app.config import MLX_DISABLED_FLAG, MPS_DISABLED_FLAG
+    for flag in (MLX_DISABLED_FLAG, MPS_DISABLED_FLAG):
+        try:
+            if not flag.exists():
+                flag.write_text("auto-disabled after Metal crash\n")
+        except Exception:
+            log.warning("Could not write %s", flag)
+
+
+def _run_heavy_stage(recording_id: int, wav_path: str, progress_cb, cpu_only: bool):
+    """Run transcription + diarization in app.core.heavy_worker as a subprocess.
+
+    Streams 'PROGRESS <frac>' lines back to progress_cb and returns
+    (transcript_result, diarization_segments). Raises _AcceleratorCrash if the
+    child is killed by a signal; re-raises a RuntimeError with the captured tail
+    for any other non-zero exit (e.g. a normal Python error like a bad HF token)."""
+    import os
+    import sys
+    import json
+    import tempfile
+    import subprocess
+    from app.config import INSTALL_DIR
+
+    out_json = Path(tempfile.gettempdir()) / f"vozmeet_heavy_{recording_id}.json"
+    if out_json.exists():
+        out_json.unlink()
+
+    env = dict(os.environ)
+    env["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+    env["PYTHONPATH"] = str(INSTALL_DIR) + os.pathsep + env.get("PYTHONPATH", "")
+    if cpu_only:
+        env["VOZMEET_FORCE_CPU"] = "1"
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "app.core.heavy_worker", str(wav_path), str(out_json)],
+        cwd=str(INSTALL_DIR), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+    )
+
+    tail: list[str] = []
+    for line in proc.stdout:                       # live, line-buffered
+        line = line.rstrip("\n")
+        if line.startswith("PROGRESS "):
+            try:
+                progress_cb(float(line.split()[1]))
+            except Exception:
+                pass
+        elif line:
+            tail.append(line)
+            if len(tail) > 40:
+                tail.pop(0)
+    rc = proc.wait()
+    tail_text = "\n".join(tail[-30:])
+
+    if rc == 0 and out_json.exists():
+        try:
+            with open(out_json) as f:
+                data = json.load(f)
+        finally:
+            out_json.unlink(missing_ok=True)
+        return data["transcript"], data["diarization"]
+
+    out_json.unlink(missing_ok=True)
+    # Negative rc = killed by signal; >128 = shell-style signal exit (128+sig).
+    if rc < 0 or rc > 128:
+        raise _AcceleratorCrash(rc, tail_text)
+    raise RuntimeError("Fallo en transcripción/diarización:\n" + tail_text)
 
 
 def _fmt_duration(seconds: float) -> str:
