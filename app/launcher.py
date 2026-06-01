@@ -234,6 +234,23 @@ def _trace(msg: str):
         pass
 
 
+def _preload_whisper():
+    """Warm up the Whisper model in the background so first transcription is instant.
+
+    Wrapped in detailed tracing because a fatal C-extension abort here
+    (e.g. OpenMP runtime conflict, Metal init) kills the whole process
+    without a Python traceback."""
+    _trace("preload: thread started")
+    try:
+        _trace("preload: importing transcriber")
+        from app.core.transcriber import _get_model
+        _trace("preload: calling _get_model()")
+        _get_model()
+        _trace("preload: model loaded OK")
+    except Exception as e:
+        _trace("preload: exception " + repr(e))
+
+
 def main():
     global _window
 
@@ -265,11 +282,13 @@ def main():
 
         _trace("server is up")
 
-        # Whisper preload intentionally removed from startup:
-        # importing torch/mlx C extensions in a background thread while the
-        # Cocoa event loop is starting causes a fatal SIGABRT that kills the
-        # entire process (crashes the app silently ~2 s after window opens).
-        # The model loads on demand when the first file is transcribed instead.
+        # Preload the Whisper model in the background so the first
+        # transcription is fast. If this thread ever crashes the process,
+        # ~/Library/Logs/VozMeet/startup.log shows exactly which step it
+        # reached before dying.
+        _trace("starting preload thread")
+        preload_thread = threading.Thread(target=_preload_whisper, daemon=True)
+        preload_thread.start()
 
         try:
             import webview
