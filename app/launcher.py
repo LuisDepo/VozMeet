@@ -220,11 +220,16 @@ def _free_port():
         pass
 
 
-def _preload_whisper():
-    """Warm up the Whisper model in the background so first transcription is instant."""
+def _trace(msg: str):
+    """Write a timestamped line to the startup trace log (survives C-extension crashes)."""
     try:
-        from app.core.transcriber import _get_model
-        _get_model()
+        import datetime, os as _os
+        log_dir = Path.home() / "Library" / "Logs" / "VozMeet"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(str(log_dir / "startup.log"), "a") as f:
+            f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] {msg}\n")
+            f.flush()
+            _os.fsync(f.fileno())
     except Exception:
         pass
 
@@ -232,13 +237,19 @@ def _preload_whisper():
 def main():
     global _window
 
+    _trace("=== VozMeet starting ===")
     try:
+        _trace("configure_macos_app")
         _configure_macos_app()
+
+        _trace("free_port")
         _free_port()
 
+        _trace("starting server thread")
         server_thread = threading.Thread(target=start_server, daemon=True)
         server_thread.start()
 
+        _trace("wait_for_server")
         if not wait_for_server(timeout=60):
             err = _server_error[0]
             if err:
@@ -252,8 +263,13 @@ def main():
                     "Log de error: ~/Library/Logs/VozMeet/error.log"
                 )
 
-        preload_thread = threading.Thread(target=_preload_whisper, daemon=True)
-        preload_thread.start()
+        _trace("server is up")
+
+        # Whisper preload intentionally removed from startup:
+        # importing torch/mlx C extensions in a background thread while the
+        # Cocoa event loop is starting causes a fatal SIGABRT that kills the
+        # entire process (crashes the app silently ~2 s after window opens).
+        # The model loads on demand when the first file is transcribed instead.
 
         try:
             import webview
@@ -263,13 +279,9 @@ def main():
                 "Reinstala VozMeet con el instalador oficial."
             )
 
+        _trace("creating window")
         api = VozMeetApi()
 
-        # Use a local HTML splash so WKWebView has something to render
-        # immediately. Navigating via load_url() inside webview.start(func=)
-        # avoids the pywebview 5.x race where passing a URL to create_window()
-        # causes an immediate connection attempt before the Cocoa run loop is
-        # ready, which makes WKWebView.Networking terminate and close the window.
         _LOADING_HTML = (
             "<html><head><style>"
             "body{margin:0;background:#1a1a1a;display:flex;align-items:center;"
@@ -293,11 +305,17 @@ def main():
         _window.events.closing += _on_closing
 
         def _navigate():
-            # Small delay to let WKWebView settle before the first navigation
             time.sleep(0.5)
-            _window.load_url("http://127.0.0.1:8765")
+            _trace("navigating to server")
+            try:
+                _window.load_url("http://127.0.0.1:8765")
+                _trace("load_url called")
+            except Exception as nav_exc:
+                _trace("navigate error: " + str(nav_exc))
 
+        _trace("webview.start")
         webview.start(func=_navigate)
+        _trace("webview exited normally")
         sys.exit(0)
 
     except SystemExit:
@@ -305,6 +323,7 @@ def main():
     except Exception as exc:
         import traceback
         full = traceback.format_exc()
+        _trace("EXCEPTION: " + str(exc))
         _write_error_log(full)
         _show_error_dialog(str(exc))
         sys.exit(1)
