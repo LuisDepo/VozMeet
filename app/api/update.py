@@ -91,6 +91,11 @@ def install_update():
         if src_reqs.exists():
             shutil.copy2(str(src_reqs), str(project_root / "requirements.txt"))
 
+        # Enforce numpy<2 — torch's C API is incompatible with numpy 2.x and
+        # will SIGSEGV on import.  Run this before _reconfigure_accelerators so
+        # the probe subprocesses see the correct numpy.
+        _fix_numpy(project_root)
+
         # Re-evaluate Metal/mlx + MPS compatibility for THIS machine and persist
         # the disable-flags. Runs in subprocesses so a Metal crash can't take down
         # the running app, and so the freshly-copied code path is exercised.
@@ -103,6 +108,30 @@ def install_update():
     except Exception as e:
         log.exception("Update install failed")
         return {"ok": False, "error": str(e)}
+
+
+def _fix_numpy(project_root: Path):
+    """Downgrade numpy to <2 if needed. torch's C API (tensor_numpy.cpp) is
+    incompatible with numpy 2.x — importing torch SIGSEGVs on every machine."""
+    import sys
+    import subprocess
+    venv_pip = project_root / ".venv" / "bin" / "pip"
+    if not venv_pip.exists():
+        venv_pip = project_root / ".venv" / "bin" / "pip3"
+    if not venv_pip.exists():
+        log.warning("Update: pip not found, skipping numpy fix")
+        return
+    try:
+        r = subprocess.run(
+            [str(venv_pip), "install", "--quiet", "numpy>=1.24.0,<2.0.0"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if r.returncode == 0:
+            log.info("Update: numpy pinned to <2")
+        else:
+            log.warning("Update: numpy pin failed: %s", r.stderr[-500:])
+    except Exception as e:
+        log.warning("Update: numpy pin error: %s", e)
 
 
 def _reconfigure_accelerators(project_root: Path):

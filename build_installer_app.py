@@ -314,6 +314,12 @@ def _create_venv_and_install(python_bin):
     core_lines = [l for l in all_lines if "mlx" not in l.lower()]
     mlx_lines  = [l for l in all_lines if "mlx" in l.lower()]
 
+    # Pin numpy<2 first — torch's C API is incompatible with numpy 2.x and
+    # will SIGSEGV on import even on CPU.  Install it alone so pip can't
+    # back-solve a 2.x version to satisfy another package's loose bound.
+    _log("Fijando numpy<2 (requerido por torch)...")
+    _run([VENV_PIP, "install", "--quiet", "numpy>=1.24.0,<2.0.0"], timeout=300)
+
     core_req = INSTALL_DIR / "_req_core.txt"
     core_req.write_text("\n".join(core_lines) + "\n")
     r = _run([VENV_PIP, "install", "-r", str(core_req), "--quiet"], timeout=3600)
