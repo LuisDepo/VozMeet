@@ -159,37 +159,7 @@ def _do_fresh_install():
         _install_ffmpeg(INSTALL_DIR)
         _log("ffmpeg instalado.")
 
-    _log("Creando entorno virtual Python...")
-    r = _run([python_bin, "-m", "venv", str(INSTALL_DIR / ".venv")])
-    if r.returncode != 0:
-        raise RuntimeError("No se pudo crear el entorno virtual:\n" + r.stderr)
-
-    _log("Actualizando pip...")
-    _run([VENV_PIP, "install", "--upgrade", "pip", "--quiet"])
-
-    _log("Instalando dependencias (puede tardar 20-40 min)...")
-    reqs_path = INSTALL_DIR / "requirements.txt"
-    all_lines = [l for l in reqs_path.read_text().splitlines() if l.strip()]
-    core_lines = [l for l in all_lines if "mlx" not in l.lower()]
-    mlx_lines  = [l for l in all_lines if "mlx" in l.lower()]
-
-    core_req = INSTALL_DIR / "_req_core.txt"
-    core_req.write_text("\n".join(core_lines) + "\n")
-    r = _run([VENV_PIP, "install", "-r", str(core_req), "--quiet"], timeout=3600)
-    core_req.unlink(missing_ok=True)
-    if r.returncode != 0:
-        raise RuntimeError("Error instalando dependencias:\n" + r.stderr[-1000:])
-    _log("Dependencias instaladas.")
-
-    if platform.machine() == "arm64":
-        _log("Instalando aceleracion Apple Silicon (mlx)...")
-        for dep in mlx_lines:
-            try:
-                _log("  -> " + dep)
-                _run([VENV_PIP, "install", "--quiet", dep], timeout=600)
-            except Exception:
-                pass
-        _log("Aceleracion mlx lista.")
+    _create_venv_and_install(python_bin)
 
     _log("Configurando HuggingFace...")
     token = _ask(
@@ -246,6 +216,53 @@ def _do_update():
     _log("Extrayendo archivos actualizados...")
     _extract(B64, str(INSTALL_DIR))
 
+    # ── Reparacion: Python Intel (Rosetta) en un Mac Apple Silicon ───────────
+    # Un .venv creado con un Python Intel corre con Rosetta: WKWebView se cae
+    # (ventana en blanco que se cierra) y mlx no funciona. Lo reconstruimos con
+    # un Python nativo arm64. Los datos (data/, .env) NO se tocan.
+    if platform.machine() == "arm64" and not _venv_is_arm64():
+        _log("Detectado Python Intel (Rosetta). Reparando con Apple Silicon...")
+        b = _dialog(
+            "VozMeet detecto que la instalacion actual usa una version\n"
+            "de Python para Intel (corriendo con Rosetta). Por eso la app\n"
+            "muestra una ventana en blanco y se cierra en tu Mac con\n"
+            "Apple Silicon.\n\n"
+            "El instalador instalara la version nativa (Apple Silicon) y\n"
+            "reconstruira el entorno. Tus voces y grabaciones NO se borraran.\n\n"
+            "Puede tardar 20-40 minutos y pedir tu contrasena de Mac.",
+            "VozMeet - Reparar instalacion",
+            ["Cancelar", "Reparar"])
+        if b == "Cancelar":
+            sys.exit(0)
+
+        python_bin = _find_python()
+        if not python_bin:
+            python_bin = _install_python()
+
+        venv_dir = INSTALL_DIR / ".venv"
+        if venv_dir.exists():
+            _log("Eliminando entorno Intel anterior...")
+            shutil.rmtree(str(venv_dir))
+
+        if not _find_ffmpeg_path():
+            _log("Descargando ffmpeg...")
+            try:
+                _install_ffmpeg(INSTALL_DIR)
+            except Exception:
+                pass
+
+        _create_venv_and_install(python_bin)
+
+        _log("Construyendo VozMeet.app (Apple Silicon)...")
+        _build_app()
+
+        _dialog(
+            "VozMeet se reparo y ahora usa Python nativo Apple Silicon.\n\n"
+            "Tus voces y grabaciones se conservaron.\n\n"
+            "Abre VozMeet desde la carpeta Aplicaciones.",
+            "Reparacion completada")
+        return
+
     if not _find_ffmpeg_path():
         _log("Descargando ffmpeg...")
         try:
@@ -276,6 +293,41 @@ def _do_update():
         "- Resumen de reunion con IA local\n\n"
         "Abre VozMeet desde la carpeta Aplicaciones.",
         "Actualizacion completada")
+
+# ── Shared: create venv + install all dependencies ───────────────────────────
+def _create_venv_and_install(python_bin):
+    _log("Creando entorno virtual Python...")
+    r = _run([python_bin, "-m", "venv", str(INSTALL_DIR / ".venv")])
+    if r.returncode != 0:
+        raise RuntimeError("No se pudo crear el entorno virtual:\n" + r.stderr)
+
+    _log("Actualizando pip...")
+    _run([VENV_PIP, "install", "--upgrade", "pip", "--quiet"])
+
+    _log("Instalando dependencias (puede tardar 20-40 min)...")
+    reqs_path = INSTALL_DIR / "requirements.txt"
+    all_lines = [l for l in reqs_path.read_text().splitlines() if l.strip()]
+    core_lines = [l for l in all_lines if "mlx" not in l.lower()]
+    mlx_lines  = [l for l in all_lines if "mlx" in l.lower()]
+
+    core_req = INSTALL_DIR / "_req_core.txt"
+    core_req.write_text("\n".join(core_lines) + "\n")
+    r = _run([VENV_PIP, "install", "-r", str(core_req), "--quiet"], timeout=3600)
+    core_req.unlink(missing_ok=True)
+    if r.returncode != 0:
+        raise RuntimeError("Error instalando dependencias:\n" + r.stderr[-1000:])
+    _log("Dependencias instaladas.")
+
+    # mlx (aceleracion Apple Silicon) — solo en arm64, no fatal si falla
+    if platform.machine() == "arm64":
+        _log("Instalando aceleracion Apple Silicon (mlx)...")
+        for dep in mlx_lines:
+            try:
+                _log("  -> " + dep)
+                _run([VENV_PIP, "install", "--quiet", dep], timeout=600)
+            except Exception:
+                pass
+        _log("Aceleracion mlx lista.")
 
 # ── Shared: build VozMeet.app ─────────────────────────────────────────────────
 def _build_app():
@@ -326,32 +378,55 @@ def _build_app():
     subprocess.run(["killall", "Dock"], capture_output=True)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+def _python_arch(py):
+    """Return the architecture a given python runs as ('arm64', 'x86_64', '')."""
+    try:
+        r = subprocess.run(
+            [py, "-c", "import platform;print(platform.machine())"],
+            capture_output=True, text=True, timeout=30)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+def _venv_is_arm64():
+    """True if the installed venv python runs natively as arm64."""
+    return _python_arch(VENV_PY) == "arm64"
+
 def _find_python():
+    """Find a Python 3.11+. On Apple Silicon, only accept a NATIVE arm64 build
+    (an Intel build runs under Rosetta and breaks WKWebView + mlx)."""
+    host_arm = platform.machine() == "arm64"
     candidates = [
         "/opt/homebrew/bin/python3.13",
         "/opt/homebrew/bin/python3.12",
         "/opt/homebrew/bin/python3.11",
+        "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13",
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+        "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11",
         "/usr/local/bin/python3.13",
         "/usr/local/bin/python3.12",
         "/usr/local/bin/python3.11",
     ]
-    for p in candidates:
-        if Path(p).exists():
-            r = subprocess.run([p, "--version"], capture_output=True, text=True)
-            if r.returncode == 0:
-                return p
     for py in ["python3.11", "python3.12", "python3.13", "python3"]:
         r = subprocess.run(["which", py], capture_output=True, text=True)
         if r.returncode == 0 and r.stdout.strip():
-            path = r.stdout.strip()
-            ver = subprocess.run([path, "-c",
-                "import sys; print(sys.version_info.minor)"],
-                capture_output=True, text=True).stdout.strip()
-            try:
-                if int(ver) >= 11:
-                    return path
-            except ValueError:
-                pass
+            candidates.append(r.stdout.strip())
+
+    for p in candidates:
+        if not Path(p).exists():
+            continue
+        ver = subprocess.run(
+            [p, "-c", "import sys; print(sys.version_info.minor)"],
+            capture_output=True, text=True).stdout.strip()
+        try:
+            if int(ver) < 11:
+                continue
+        except ValueError:
+            continue
+        # On Apple Silicon, skip Intel/Rosetta pythons.
+        if host_arm and _python_arch(p) != "arm64":
+            continue
+        return p
     return None
 
 def _find_ffmpeg_path():
@@ -370,9 +445,11 @@ def _find_ffmpeg_path():
     return None
 
 def _install_python():
+    # python.org "macos11" build is a universal2 package: it provides a native
+    # arm64 binary on Apple Silicon, which is exactly what we need.
     url = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg"
     pkg = "/tmp/vozmeet_python-3.11.9.pkg"
-    _log("Descargando Python 3.11.9 (~45 MB)...")
+    _log("Descargando Python 3.11.9 universal (~45 MB)...")
     urllib.request.urlretrieve(url, pkg)
 
     shell_cmd = "/usr/sbin/installer -pkg '" + pkg + "' -target /"
@@ -395,7 +472,10 @@ def _install_python():
         py = _find_python()
     if not py or not Path(py).exists():
         raise RuntimeError("Python se instalo pero no se encontro el ejecutable.")
-    _log("Python 3.11 instalado.")
+    if platform.machine() == "arm64" and _python_arch(py) != "arm64":
+        raise RuntimeError(
+            "Se instalo Python pero no es la version Apple Silicon (arm64).")
+    _log("Python 3.11 (Apple Silicon) instalado.")
     return py
 
 def _install_ffmpeg(install_dir):
@@ -598,6 +678,10 @@ assert "1.4" in content, "version not updated"
 assert "_show_progress_window" in content, "missing progress window"
 assert "tkinter" in content, "missing tkinter"
 assert "_run_installer_bg" in content, "missing background thread"
+assert "_python_arch" in content, "missing arch detection"
+assert "_venv_is_arm64" in content, "missing venv arch check"
+assert "_create_venv_and_install" in content, "missing shared venv builder"
+assert "Rosetta" in content, "missing Intel/Rosetta repair"
 print("Content checks: OK")
 
 # ── Zip ───────────────────────────────────────────────────────────────────────
