@@ -366,6 +366,9 @@ def _build_app():
     launcher.write_text(
         "#!" + VENV_PY + "\n"
         "import sys, os\n"
+        "# OpenMP duplicate-runtime guard — must be set before torch/ctranslate2\n"
+        "# load, or OpenMP calls abort() (SIGABRT) and the app closes silently.\n"
+        "os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')\n"
         "os.chdir(r'" + str(INSTALL_DIR) + "')\n"
         "sys.path.insert(0, r'" + str(INSTALL_DIR) + "')\n"
         "from app.launcher import main\n"

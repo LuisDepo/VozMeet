@@ -1,6 +1,16 @@
 """
 VozMeet launcher — entry point for the macOS .app bundle.
 """
+import os
+
+# ── OpenMP duplicate-runtime guard (MUST be set before torch/ctranslate2 load) ─
+# faster-whisper pulls in both torch and ctranslate2; each bundles its own
+# OpenMP runtime (libomp / libiomp5). When two OpenMP runtimes load into one
+# process, OpenMP calls abort() ("OMP: Error #15") which kills the whole app
+# with SIGABRT (signal 6) — a blank/closing window with no error dialog.
+# This env var downgrades that fatal abort to a harmless warning.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import sys
 import time
 import threading
@@ -247,42 +257,49 @@ def _preload_whisper():
     which works on every Mac."""
     _trace("preload: thread started")
     import subprocess
-    try:
-        project_root = str(Path(__file__).parent.parent)
-        mlx_flag = Path(__file__).parent.parent / ".mlx_disabled"
+    project_root = str(Path(__file__).parent.parent)
+    mlx_flag = Path(__file__).parent.parent / ".mlx_disabled"
 
-        _trace("preload: launching isolated subprocess")
-        r = subprocess.run(
+    def _warm(label):
+        """Run _get_model() in a throwaway subprocess. Returns the return code.
+        Any C-extension abort (mlx Metal SIGABRT, OpenMP abort) is confined to
+        the child and can NEVER take down the main app."""
+        env = dict(os.environ)
+        env["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+        _trace("preload: launching subprocess (" + label + ")")
+        return subprocess.run(
             [sys.executable, "-c",
              "import sys; sys.path.insert(0, " + repr(project_root) + ");"
              " from app.core.transcriber import _get_model; _get_model();"
              " print('preload_ok')"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=120, env=env,
         )
 
+    try:
+        r = _warm("attempt 1")
         if r.returncode == 0 and "preload_ok" in r.stdout:
             _trace("preload: model loaded OK in subprocess")
-        else:
-            _trace(
-                "preload: subprocess rc=" + str(r.returncode) +
-                " stderr=" + r.stderr[:300]
-            )
-            # Non-zero exit (likely SIGABRT from mlx Metal init) — disable mlx
-            if r.returncode != 0 and not mlx_flag.exists():
-                _trace("preload: writing .mlx_disabled (Metal init crash detected)")
-                try:
-                    mlx_flag.write_text("Crash rc=" + str(r.returncode) + "\n")
-                except Exception:
-                    pass
+            return
 
-            # Retry in-process: .mlx_disabled is now set so faster-whisper is used
+        _trace("preload: subprocess rc=" + str(r.returncode) +
+               " stderr=" + r.stderr[:300])
+
+        # Non-zero exit (likely SIGABRT from mlx Metal init on M1) — disable mlx
+        if r.returncode != 0 and not mlx_flag.exists():
+            _trace("preload: writing .mlx_disabled (Metal init crash detected)")
             try:
-                _trace("preload: retrying in-process with faster-whisper")
-                from app.core.transcriber import _get_model
-                _get_model()
-                _trace("preload: faster-whisper ready")
-            except Exception as e2:
-                _trace("preload: fallback also failed: " + repr(e2))
+                mlx_flag.write_text("Crash rc=" + str(r.returncode) + "\n")
+            except Exception:
+                pass
+
+        # Retry warm-up in a SECOND subprocess — never in-process, so even if
+        # faster-whisper/torch aborts the main app stays alive.
+        r2 = _warm("attempt 2 (faster-whisper)")
+        if r2.returncode == 0 and "preload_ok" in r2.stdout:
+            _trace("preload: faster-whisper ready (subprocess)")
+        else:
+            _trace("preload: fallback subprocess rc=" + str(r2.returncode) +
+                   " stderr=" + r2.stderr[:300])
 
     except subprocess.TimeoutExpired:
         _trace("preload: subprocess timed out (120s)")
