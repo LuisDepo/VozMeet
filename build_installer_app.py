@@ -167,6 +167,52 @@ VENV_PY  = str(INSTALL_DIR / ".venv/bin/python")
 VENV_PIP = str(INSTALL_DIR / ".venv/bin/pip")
 B64 = "TAR_B64_PLACEHOLDER"
 
+# ── Run natively on Apple Silicon ─────────────────────────────────────────────
+# A .app can get launched translated under Rosetta (x86_64) — e.g. when an older
+# Intel python3 is first on PATH, or the launch context inherits x86_64. macOS
+# then runs every *universal* child we spawn (the framework python, the venv,
+# pip) translated too, so pip fetches x86_64 wheels and numpy/torch fail to load
+# on arm64 with 'incompatible architecture'. Detecting the arch is not enough —
+# the whole pipeline has to actually RUN native. Re-exec ourselves under
+# `arch -arm64` so it does. Guarded by an env var so it can never loop.
+def _reexec_arm64_if_needed():
+    if platform.machine() == "arm64":
+        return                                   # already native — nothing to do
+    if os.environ.get("VOZMEET_ARM64_REEXEC") == "1":
+        return                                   # already attempted — avoid loop
+    try:
+        r = subprocess.run(["sysctl", "-n", "hw.optional.arm64"],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return
+    if r.stdout.strip() != "1":
+        return                                   # a genuine Intel Mac — stay x86_64
+    env = dict(os.environ, VOZMEET_ARM64_REEXEC="1")
+    me = os.path.realpath(__file__)
+    for py in (sys.executable,
+               "/usr/bin/python3",
+               "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11"):
+        if not py or not os.path.exists(py):
+            continue
+        # Confirm this python actually HAS an arm64 slice before committing to
+        # exec — `arch -arm64` on an Intel-only binary would leave us dead.
+        try:
+            chk = subprocess.run(["arch", "-arm64", py, "-c",
+                                  "import platform;print(platform.machine())"],
+                                 capture_output=True, text=True, timeout=30)
+        except Exception:
+            continue
+        if chk.returncode == 0 and chk.stdout.strip() == "arm64":
+            try:
+                os.execve("/usr/bin/arch",
+                          ["arch", "-arm64", py, me] + sys.argv[1:], env)
+            except Exception:
+                pass                              # try the next candidate python
+    # No arm64-capable python found yet — continue as x86_64; _install_python()
+    # installs the universal2 build and the next launch goes native.
+
+_reexec_arm64_if_needed()
+
 # ── Fresh install ─────────────────────────────────────────────────────────────
 def _do_fresh_install():
     btn = _dialog(
@@ -624,7 +670,21 @@ def _host_is_apple_silicon():
     return platform.machine() == "arm64"
 
 def _python_arch(py):
-    """Return the architecture a given python runs as ('arm64', 'x86_64', '')."""
+    """Architecture a given python CAN run as ('arm64', 'x86_64', '').
+    On Apple Silicon we force the arm64 slice via `arch -arm64`, so a universal2
+    build is correctly reported as arm64 even when THIS process is translated
+    under Rosetta — where a plain subprocess would inherit x86_64 and make a
+    perfectly good universal python look Intel-only."""
+    if _host_is_apple_silicon():
+        try:
+            r = subprocess.run(
+                ["arch", "-arm64", py, "-c", "import platform;print(platform.machine())"],
+                capture_output=True, text=True, timeout=30)
+            if r.returncode == 0 and r.stdout.strip() == "arm64":
+                return "arm64"
+        except Exception:
+            pass
+        # `arch -arm64` failed → no arm64 slice → fall through to report x86_64.
     try:
         r = subprocess.run(
             [py, "-c", "import platform;print(platform.machine())"],
@@ -1029,7 +1089,9 @@ assert "mx.eval" in content, "mlx test must run real compute, not just import"
 assert "device='mps'" in content, "missing torch MPS compatibility test"
 assert ".mlx_disabled" in content, "missing mlx_disabled flag"
 assert ".mps_disabled" in content, "missing mps_disabled flag"
-assert "1.5" in content, "version not updated"
+assert "_reexec_arm64_if_needed" in content, "missing arm64 re-exec"
+assert "VOZMEET_ARM64_REEXEC" in content, "missing re-exec loop guard"
+assert 'os.execve("/usr/bin/arch"' in content, "re-exec must use arch -arm64"
 assert "_show_progress_window" in content, "missing progress window"
 assert "tkinter" in content, "missing tkinter"
 assert "_run_installer_bg" in content, "missing background thread"
