@@ -272,6 +272,13 @@ def _do_update():
             pass
 
     _log("Instalando dependencias nuevas...")
+    # Pin numpy<2 FIRST — torch's C API is incompatible with numpy 2.x and
+    # SIGSEGVs on import (rc=-11) even on CPU.  An existing install may already
+    # have numpy 2.x, and the mlx --upgrade below can pull it back in, so force
+    # the downgrade here and verify it actually took.
+    _log("Fijando numpy<2 (requerido por torch)...")
+    _run([VENV_PIP, "install", "--quiet", "numpy>=1.24.0,<2.0.0"], timeout=300)
+
     deps = ["python-docx>=1.1.0"]
     if platform.machine() == "arm64":
         deps += ["mlx-whisper>=0.4.0", "mlx-lm>=0.20.0"]
@@ -281,6 +288,16 @@ def _do_update():
             _run([VENV_PIP, "install", "--quiet", "--upgrade", dep], timeout=600)
         except Exception:
             pass
+
+    # mlx/--upgrade may have dragged numpy 2.x back in. Re-pin and confirm the
+    # installed numpy is <2 so torch can import.
+    _log("Verificando numpy<2...")
+    _run([VENV_PIP, "install", "--quiet", "numpy>=1.24.0,<2.0.0"], timeout=300)
+    nv = _run([VENV_PY, "-c", "import numpy,sys;sys.exit(0 if numpy.__version__[0]=='1' else 1)"])
+    if nv.returncode != 0:
+        _log("numpy 2.x persiste — forzando reinstalacion limpia de numpy<2...")
+        _run([VENV_PIP, "install", "--quiet", "--force-reinstall",
+              "numpy>=1.24.0,<2.0.0"], timeout=300)
 
     # Re-test Metal compatibility every update — mlx may have been fixed upstream
     _test_and_configure_mlx()
