@@ -61,10 +61,15 @@ CREATE TABLE IF NOT EXISTS recording_speakers (
 
 
 def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    # timeout: how long sqlite3 itself waits for a lock at the Python layer.
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # busy_timeout: the pipeline worker thread writes segments/progress while API
+    # requests also read/write. Without this, a concurrent writer raises
+    # "database is locked" immediately (→ 500). Wait up to 15s for the lock.
+    conn.execute("PRAGMA busy_timeout=15000")
     return conn
 
 

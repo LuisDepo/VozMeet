@@ -42,8 +42,9 @@ def get_summary(recording_id: int):
         for row in segs
     ]
 
-    language = rec["language_detected"] or "es"
-    lang_code = "es" if "spañol" in language else "en"
+    language = (rec["language_detected"] or "es").lower()
+    # language_detected may be a code ("es") or a display name ("Español").
+    lang_code = "es" if ("es" == language or "spa" in language or "ñol" in language) else "en"
 
     log.info("[%d] Generating meeting summary (%d segments)", recording_id, len(segments))
     result = summarize(segments, lang_code)

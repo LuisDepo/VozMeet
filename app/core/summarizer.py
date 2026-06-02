@@ -15,6 +15,17 @@ _backend = None
 
 
 def is_available() -> bool:
+    # Summarization uses mlx-lm, which runs on Metal. On machines where Metal
+    # is unstable (e.g. some M1 configs) the installer sets .mlx_disabled — we
+    # honour it here because an mlx Metal abort() (SIGABRT) in this in-process
+    # code path would crash the whole app (it can't be caught). On those Macs
+    # the summary feature is simply unavailable rather than a crash risk.
+    try:
+        from app.config import mlx_disabled
+        if mlx_disabled():
+            return False
+    except Exception:
+        pass
     try:
         import mlx_lm  # noqa: F401
         return True
@@ -25,6 +36,14 @@ def is_available() -> bool:
 def _get_model():
     global _model, _tokenizer, _backend
     if _model is None:
+        try:
+            from app.config import mlx_disabled
+        except Exception:
+            mlx_disabled = lambda: False
+        if mlx_disabled():
+            log.warning("mlx disabled on this machine — summary unavailable")
+            _backend = "unavailable"
+            return _model, _tokenizer
         try:
             from mlx_lm import load
             log.info("Loading summary model: %s", MLX_LM_REPO)

@@ -29,6 +29,16 @@ def merge(
                 best_overlap = ov
                 best_speaker = d_seg["speaker"]
 
+        # A transcript segment falling in a gap between diarization turns has no
+        # overlap → assign the nearest turn by midpoint distance instead of
+        # leaving it "Desconocido", so every line gets a speaker.
+        if best_speaker is None and diarization_segments:
+            t_mid = (t_start + t_end) / 2.0
+            best_speaker = min(
+                diarization_segments,
+                key=lambda d: abs(((d["start"] + d["end"]) / 2.0) - t_mid),
+            )["speaker"]
+
         confidence = (best_overlap / total_duration) if total_duration > 0 else 0.0
 
         merged.append({

@@ -57,10 +57,8 @@ def update_speaker(speaker_id: int, body: SpeakerUpdate):
             "UPDATE speakers SET display_name = ?, name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (body.display_name, body.display_name.lower().replace(" ", "_"), speaker_id),
         )
-        conn.execute(
-            "UPDATE segments SET raw_speaker_label = raw_speaker_label WHERE speaker_id = ?",
-            (speaker_id,),
-        )
+        # Segments resolve the display name live via JOIN on speaker_id, so no
+        # per-segment update is needed here.
     return {"ok": True, "display_name": body.display_name}
 
 

@@ -40,11 +40,29 @@ def main() -> int:
         diarization = []
     else:
         from app.core.diarizer import diarize
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            future_tx = ex.submit(transcribe, wav_path, None, _progress)
-            future_di = ex.submit(diarize, wav_path)
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        future_tx = ex.submit(transcribe, wav_path, None, _progress)
+        future_di = ex.submit(diarize, wav_path)
+        # Transcription is mandatory; surface its error immediately. We do NOT
+        # use a `with` block because ThreadPoolExecutor.__exit__ would join the
+        # (possibly long-running) diarization thread even when transcription has
+        # already failed — a needless multi-minute stall. shutdown(wait=False)
+        # lets this process exit promptly; the parent's watchdog bounds it.
+        try:
             transcript = future_tx.result()
+        except Exception:
+            ex.shutdown(wait=False)
+            raise
+        # Diarization is best-effort: if it fails, still emit the transcript with
+        # no speaker turns (the parent synthesises a single speaker). This avoids
+        # failing the whole run over a diarization-only problem (bad HF token,
+        # MPS hiccup) when we already have a good transcript.
+        try:
             diarization = future_di.result()
+        except Exception as e:
+            sys.stderr.write("diarization failed, continuing transcript-only: %r\n" % e)
+            diarization = []
+        ex.shutdown(wait=False)
 
     with open(out_json, "w") as f:
         json.dump({"transcript": transcript, "diarization": diarization}, f)

@@ -140,7 +140,8 @@ def _execute_pipeline(recording_id: int, file_path: str):
 
     try:
         transcript_result, diarization_segments = _run_heavy_stage(
-            recording_id, wav_path, _transcription_progress, cpu_only=False)
+            recording_id, wav_path, _transcription_progress, duration,
+            cpu_only=False, no_diarize=False)
     except _AcceleratorCrash as crash:
         log.error("[%d] Heavy stage crashed (rc=%s) — disabling Metal accelerators, "
                   "retrying on CPU.\n%s", recording_id, crash.returncode, crash.tail)
@@ -149,7 +150,8 @@ def _execute_pipeline(recording_id: int, file_path: str):
                 "Reintentando en modo CPU (compatible con cualquier Mac)...")
         try:
             transcript_result, diarization_segments = _run_heavy_stage(
-                recording_id, wav_path, _transcription_progress, cpu_only=True)
+                recording_id, wav_path, _transcription_progress, duration,
+                cpu_only=True, no_diarize=False)
         except _AcceleratorCrash as crash2:
             # Both metal and CPU attempts crashed (likely torch broken on this machine).
             # Fall back to transcription only — faster-whisper never needs torch.
@@ -158,17 +160,30 @@ def _execute_pipeline(recording_id: int, file_path: str):
                       recording_id, crash2.returncode, crash2.tail)
             _notify(recording_id, 10, "Procesando audio",
                     "Transcribiendo sin separación de voces (modo de compatibilidad)...")
-            _run_heavy_stage._no_diarize = True
-            try:
-                transcript_result, diarization_segments = _run_heavy_stage(
-                    recording_id, wav_path, _transcription_progress, cpu_only=True)
-            finally:
-                _run_heavy_stage._no_diarize = False
+            transcript_result, diarization_segments = _run_heavy_stage(
+                recording_id, wav_path, _transcription_progress, duration,
+                cpu_only=True, no_diarize=True)
 
     transcript_segments = transcript_result["segments"]
     language = transcript_result["language"]
     language_display = transcript_result["language_display"]
     log.info("[%d] Transcription done: %d segments, lang=%s", recording_id, len(transcript_segments), language)
+
+    # No speech at all (silent/music-only file): finish with a clear status
+    # instead of silently completing with 0 segments in an "identifying" state.
+    if not transcript_segments:
+        log.info("[%d] No speech detected in audio", recording_id)
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE recordings SET language_detected=?, speaker_count=0, "
+                "status='completed', pipeline_stage='completed', "
+                "completed_at=CURRENT_TIMESTAMP WHERE id=?",
+                (language_display, recording_id),
+            )
+        _notify(recording_id, 100, "Completado",
+                "No se detectó voz en el audio.")
+        _pipeline_results[recording_id] = {"segments": 0, "speakers": 0}
+        return
 
     # When diarization was skipped (torch unavailable), synthesise a single
     # speaker entry covering the full audio so the merge stage still works.
@@ -322,17 +337,23 @@ def _disable_accelerators():
             log.warning("Could not write %s", flag)
 
 
-def _run_heavy_stage(recording_id: int, wav_path: str, progress_cb, cpu_only: bool):
+def _run_heavy_stage(recording_id: int, wav_path: str, progress_cb,
+                     duration: float, cpu_only: bool, no_diarize: bool = False):
     """Run transcription + diarization in app.core.heavy_worker as a subprocess.
 
     Streams 'PROGRESS <frac>' lines back to progress_cb and returns
     (transcript_result, diarization_segments). Raises _AcceleratorCrash if the
     child is killed by a signal; re-raises a RuntimeError with the captured tail
-    for any other non-zero exit (e.g. a normal Python error like a bad HF token)."""
+    for any other non-zero exit (e.g. a normal Python error like a bad HF token).
+
+    A watchdog thread kills the child if it runs far longer than the audio could
+    plausibly need, so a wedged model download or a deadlocked native lib can
+    never hang the app forever."""
     import os
     import sys
     import json
     import tempfile
+    import threading
     import subprocess
     from app.config import INSTALL_DIR
 
@@ -347,7 +368,7 @@ def _run_heavy_stage(recording_id: int, wav_path: str, progress_cb, cpu_only: bo
         env["VOZMEET_FORCE_CPU"] = "1"
 
     cmd = [sys.executable, "-m", "app.core.heavy_worker", str(wav_path), str(out_json)]
-    if getattr(_run_heavy_stage, "_no_diarize", False):
+    if no_diarize:
         cmd.append("--no-diarize")
 
     proc = subprocess.Popen(
@@ -355,6 +376,27 @@ def _run_heavy_stage(recording_id: int, wav_path: str, progress_cb, cpu_only: bo
         cwd=str(INSTALL_DIR), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
+
+    # Watchdog: generous upper bound. CPU transcription+diarization of a 1h file
+    # can take ~1h; allow 8x audio duration plus a 30-min floor (covers the
+    # first-run model download). On timeout the child is killed, which EOFs
+    # stdout below and surfaces as a normal failure (then the caller's fallbacks
+    # run) rather than an infinite hang.
+    timed_out = {"flag": False}
+    limit = max(1800.0, float(duration or 0) * 8.0)
+
+    def _kill_after_limit():
+        try:
+            proc.wait(timeout=limit)
+        except subprocess.TimeoutExpired:
+            timed_out["flag"] = True
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    wd = threading.Thread(target=_kill_after_limit, daemon=True)
+    wd.start()
 
     tail: list[str] = []
     for line in proc.stdout:                       # live, line-buffered
@@ -371,18 +413,30 @@ def _run_heavy_stage(recording_id: int, wav_path: str, progress_cb, cpu_only: bo
     rc = proc.wait()
     tail_text = "\n".join(tail[-30:])
 
+    if timed_out["flag"]:
+        out_json.unlink(missing_ok=True)
+        raise RuntimeError(
+            "El procesamiento excedió el tiempo máximo y se detuvo.\n" + tail_text)
+
     if rc == 0 and out_json.exists():
         try:
             with open(out_json) as f:
                 data = json.load(f)
-        finally:
+        except Exception as e:
             out_json.unlink(missing_ok=True)
+            raise RuntimeError("Resultado del procesamiento ilegible: %s\n%s"
+                               % (e, tail_text))
+        out_json.unlink(missing_ok=True)
         return data["transcript"], data["diarization"]
 
     out_json.unlink(missing_ok=True)
     # Negative rc = killed by signal; >128 = shell-style signal exit (128+sig).
     if rc < 0 or rc > 128:
         raise _AcceleratorCrash(rc, tail_text)
+    if rc == 0:
+        # Exited cleanly but produced no output file — treat as a real failure
+        # with a clear message instead of silently returning nothing.
+        raise RuntimeError("El procesamiento terminó sin resultado.\n" + tail_text)
     raise RuntimeError("Fallo en transcripción/diarización:\n" + tail_text)
 
 

@@ -3,8 +3,13 @@
 Build VozMeet-Installer.app — handles BOTH fresh install AND update.
 No Terminal required. Output: /tmp/VozMeet-Installer.zip
 """
-import base64, tarfile, io, os, stat, shutil, zipfile
+import base64, tarfile, io, os, stat, shutil, zipfile, re
 from pathlib import Path
+
+# Single source of truth for the version string (app/version.py).
+_vtxt = Path("app/version.py").read_text()
+_m = re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', _vtxt)
+APP_VERSION = _m.group(1) if _m else "1.5"
 
 # ── 1. Build tar.gz of app files ──────────────────────────────────────────────
 FILES = [
@@ -108,7 +113,53 @@ def _extract(b64_data, dest):
             tar.extractall(dest)
 
 def _run(cmd, timeout=600, check=False):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # errors="replace" so non-UTF-8 bytes from pip/ffmpeg can't raise
+    # UnicodeDecodeError. A timeout returns a synthetic failed result instead of
+    # raising, so a single stuck command can't abort the whole install.
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout if isinstance(e.stdout, str) else ""
+        return subprocess.CompletedProcess(
+            cmd, 124, out,
+            "Tiempo de espera agotado (%ds): %s" % (timeout, " ".join(map(str, cmd[:2]))))
+    except FileNotFoundError as e:
+        return subprocess.CompletedProcess(cmd, 127, "", str(e))
+
+
+def _urlretrieve(url, dest):
+    """Download a file with SSL that works even on a Python whose CA certs were
+    never installed (the python.org build's known 'Install Certificates' gap).
+    Tries certifi, then the system trust store, then — as a last resort for these
+    trusted python.org/github URLs — an unverified context, so a cert-less Mac
+    can still install instead of dying with CERTIFICATE_VERIFY_FAILED."""
+    import ssl
+    contexts = []
+    try:
+        import certifi
+        contexts.append(ssl.create_default_context(cafile=certifi.where()))
+    except Exception:
+        pass
+    try:
+        contexts.append(ssl.create_default_context())
+    except Exception:
+        pass
+    try:
+        contexts.append(ssl._create_unverified_context())
+    except Exception:
+        pass
+    last = None
+    for ctx in contexts:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "VozMeet"})
+            with urllib.request.urlopen(req, timeout=180, context=ctx) as resp:
+                with open(dest, "wb") as f:
+                    shutil.copyfileobj(resp, f)
+            return
+        except Exception as e:
+            last = e
+    raise last if last else RuntimeError("No se pudo descargar: " + url)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 INSTALL_DIR = Path.home() / "AppsBMS/VozMeet/VozMeet-claude-vozmeet-macos-app-EOB7u"
@@ -430,7 +481,7 @@ def _build_app():
         '  <key>CFBundleName</key>          <string>VozMeet</string>\n'
         '  <key>CFBundleDisplayName</key>   <string>VozMeet</string>\n'
         '  <key>CFBundleIdentifier</key>    <string>com.bms.vozmeet</string>\n'
-        '  <key>CFBundleVersion</key>       <string>1.5</string>\n'
+        '  <key>CFBundleVersion</key>       <string>__APP_VERSION__</string>\n'
         '  <key>CFBundleExecutable</key>    <string>VozMeet</string>\n'
         '  <key>CFBundleIconFile</key>      <string>VozMeet</string>\n'
         '  <key>NSHighResolutionCapable</key><true/>\n'
@@ -442,16 +493,64 @@ def _build_app():
     if icon_src.exists():
         shutil.copy2(str(icon_src), str(APP / "Contents/Resources/VozMeet.icns"))
 
-    dest = Path("/Applications/VozMeet.app")
-    if dest.exists():
-        shutil.rmtree(str(dest))
-    shutil.copytree(str(APP), str(dest))
+    dest = _install_app_bundle(APP)
 
     lsreg = ("/System/Library/Frameworks/CoreServices.framework"
              "/Frameworks/LaunchServices.framework/Support/lsregister")
     if os.path.exists(lsreg):
         subprocess.run([lsreg, "-f", str(dest)], capture_output=True)
     subprocess.run(["killall", "Dock"], capture_output=True)
+    return dest
+
+
+def _install_app_bundle(APP):
+    """Place VozMeet.app where the user can launch it, without ever failing the
+    whole install on a permission error. /Applications often isn't writable
+    (or the old bundle is locked), so we try, in order:
+      1. plain copy to /Applications
+      2. copy to /Applications via ditto with admin privileges (one password)
+      3. copy to ~/Applications (always writable for the current user)
+      4. leave the bundle in INSTALL_DIR as a last resort
+    Returns the final bundle path so the caller can tell the user where it is."""
+    sys_dest = Path("/Applications/VozMeet.app")
+
+    # 1. plain copy
+    try:
+        if sys_dest.exists():
+            shutil.rmtree(str(sys_dest))
+        shutil.copytree(str(APP), str(sys_dest))
+        return sys_dest
+    except Exception:
+        pass
+
+    # 2. admin ditto (handles a non-writable /Applications)
+    try:
+        sh = ("/bin/rm -rf '/Applications/VozMeet.app' && "
+              "/usr/bin/ditto '" + str(APP) + "' '/Applications/VozMeet.app'")
+        osa = 'do shell script "' + sh.replace('"', '\\"') + \
+              '" with administrator privileges'
+        r = subprocess.run(["osascript", "-e", osa], capture_output=True, text=True)
+        if r.returncode == 0 and sys_dest.exists():
+            return sys_dest
+    except Exception:
+        pass
+
+    # 3. ~/Applications (no admin needed)
+    try:
+        user_apps = Path.home() / "Applications"
+        user_apps.mkdir(parents=True, exist_ok=True)
+        user_dest = user_apps / "VozMeet.app"
+        if user_dest.exists():
+            shutil.rmtree(str(user_dest))
+        shutil.copytree(str(APP), str(user_dest))
+        _log("VozMeet.app instalado en ~/Applications (no se pudo escribir en /Applications).")
+        return user_dest
+    except Exception:
+        pass
+
+    # 4. leave it in place
+    _log("VozMeet.app quedo en: " + str(APP))
+    return APP
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _host_is_apple_silicon():
@@ -553,7 +652,7 @@ def _install_python():
     url = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg"
     pkg = "/tmp/vozmeet_python-3.11.9.pkg"
     _log("Descargando Python 3.11.9 universal (~45 MB)...")
-    urllib.request.urlretrieve(url, pkg)
+    _urlretrieve(url, pkg)
 
     shell_cmd = "/usr/sbin/installer -pkg '" + pkg + "' -target /"
     osa = 'do shell script "' + shell_cmd.replace('"', '\\"') + \
@@ -589,7 +688,7 @@ def _install_ffmpeg(install_dir):
     bin_dir.mkdir(parents=True, exist_ok=True)
     target = bin_dir / "ffmpeg"
 
-    urllib.request.urlretrieve(url, str(target))
+    _urlretrieve(url, str(target))
     target.chmod(0o755)
     subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(target)],
                    capture_output=True)
@@ -723,7 +822,9 @@ def _show_progress_window():
 _show_progress_window()
 '''
 
-installer_py = INSTALLER_PY.replace("TAR_B64_PLACEHOLDER", TAR_B64)
+installer_py = (INSTALLER_PY
+                .replace("TAR_B64_PLACEHOLDER", TAR_B64)
+                .replace("__APP_VERSION__", APP_VERSION))
 
 # ── Syntax check ──────────────────────────────────────────────────────────────
 import tempfile, subprocess as sp
@@ -795,7 +896,7 @@ py_installer.chmod(0o644)
     '  <key>CFBundleName</key>          <string>VozMeet Installer</string>\n'
     '  <key>CFBundleDisplayName</key>   <string>VozMeet Installer</string>\n'
     '  <key>CFBundleIdentifier</key>    <string>com.bms.vozmeet.installer</string>\n'
-    '  <key>CFBundleVersion</key>       <string>1.5.2</string>\n'
+    '  <key>CFBundleVersion</key>       <string>' + APP_VERSION + '</string>\n'
     '  <key>CFBundleExecutable</key>    <string>VozMeet-Installer</string>\n'
     '  <key>CFBundleIconFile</key>      <string>VozMeet</string>\n'
     '  <key>CFBundleIconName</key>      <string>VozMeet</string>\n'

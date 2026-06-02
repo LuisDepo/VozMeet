@@ -46,10 +46,17 @@ def extract_audio(input_path: str | Path, output_name: str | None = None) -> dic
         "-vn",
         str(output_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # errors="replace": ffmpeg can emit non-UTF-8 bytes on stderr, which would
+    # otherwise raise UnicodeDecodeError and abort extraction.
+    # timeout: a malformed/streaming input must not hang the pipeline forever.
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                errors="replace", timeout=3600)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ffmpeg tardó demasiado al extraer el audio (timeout).")
     if result.returncode != 0:
         raise RuntimeError(
-            f"Error al extraer audio con ffmpeg:\n{result.stderr[-2000:]}"
+            f"Error al extraer audio con ffmpeg:\n{(result.stderr or '')[-2000:]}"
         )
 
     duration = _get_duration(output_path)
@@ -79,9 +86,16 @@ def _get_duration(wav_path: Path) -> float:
         "-show_format",
         str(wav_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                errors="replace", timeout=60)
+    except subprocess.TimeoutExpired:
+        return 0.0
     if result.returncode == 0:
         import json
-        data = json.loads(result.stdout)
-        return float(data.get("format", {}).get("duration", 0))
+        try:
+            data = json.loads(result.stdout)
+            return float(data.get("format", {}).get("duration", 0))
+        except Exception:
+            return 0.0
     return 0.0

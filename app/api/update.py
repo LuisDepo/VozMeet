@@ -1,3 +1,4 @@
+import ssl
 import shutil
 import tempfile
 import zipfile
@@ -8,6 +9,21 @@ from app.logger import get_logger
 
 router = APIRouter()
 log = get_logger("update")
+
+
+def _ssl_context():
+    """An SSL context that works even on a Python whose CA certs were never
+    installed (python.org's known 'Install Certificates' gap). Prefer certifi,
+    then the system store, then unverified for these trusted GitHub URLs."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    try:
+        return ssl.create_default_context()
+    except Exception:
+        return ssl._create_unverified_context()
 
 # The working build lives on this branch; the in-app updater pulls from it so
 # the Update button delivers the same code as the installer .zip.
@@ -22,7 +38,7 @@ def check_update():
         url = ("https://raw.githubusercontent.com/luisdepo/vozmeet/"
                f"{UPDATE_BRANCH}/app/version.py")
         req = urllib.request.Request(url, headers={"User-Agent": "VozMeet"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_ssl_context()) as resp:
             content = resp.read().decode()
         remote_version = CURRENT_VERSION
         for line in content.splitlines():
@@ -57,11 +73,14 @@ def install_update():
 
         log.info("Update: downloading from GitHub...")
         req = urllib.request.Request(GITHUB_ZIP, headers={"User-Agent": "VozMeet"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=120, context=_ssl_context()) as resp:
             zip_path.write_bytes(resp.read())
 
         log.info("Update: extracting zip...")
         with zipfile.ZipFile(str(zip_path), "r") as zf:
+            bad = zf.testzip()
+            if bad is not None:
+                return {"ok": False, "error": "Descarga corrupta: " + bad}
             zf.extractall(tmp)
 
         # GitHub zips extract to <repo>-<branch>/ folder

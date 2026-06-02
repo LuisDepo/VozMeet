@@ -57,10 +57,14 @@ def _get_model():
             from faster_whisper import WhisperModel
             device = WHISPER_DEVICE
             if device == "auto":
+                # Any failure importing torch (missing, numpy-2 ABI break, or an
+                # x86_64 build on arm64 raising OSError on dlopen) must fall back
+                # to CPU — faster-whisper uses ctranslate2, not torch, so it works
+                # regardless. Catch broadly, not just ImportError.
                 try:
                     import torch
                     device = "cuda" if torch.cuda.is_available() else "cpu"
-                except ImportError:
+                except Exception:
                     device = "cpu"
             # Use every CPU core so the int8 model runs as fast as the machine allows.
             cpu_threads = os.cpu_count() or 4

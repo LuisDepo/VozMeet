@@ -214,25 +214,25 @@ def export_transcript(
 ):
     data = _build_transcript_data(recording_id)
     stem = Path(data["filename"]).stem[:40]
+    # The download name shown to the user (no id needed).
+    filename = f"{stem}_vozmeet.{format}"
 
     if format == "json":
         output_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-        filename = f"{stem}_vozmeet.json"
         content_type = "application/json"
     elif format == "md":
         output_bytes = _to_md(data).encode("utf-8")
-        filename = f"{stem}_vozmeet.md"
         content_type = "text/markdown; charset=utf-8"
     elif format == "docx":
         output_bytes = _to_docx(data)
-        filename = f"{stem}_vozmeet.docx"
         content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     else:
         output_bytes = _to_txt(data).encode("utf-8")
-        filename = f"{stem}_vozmeet.txt"
         content_type = "text/plain; charset=utf-8"
 
-    out_path = TRANSCRIPTS_DIR / filename
+    # Disk filename includes recording_id so two recordings with similar names
+    # can't overwrite each other's export or serve a half-written file.
+    out_path = TRANSCRIPTS_DIR / f"{recording_id}_{stem}_vozmeet.{format}"
     out_path.write_bytes(output_bytes)
 
     return FileResponse(

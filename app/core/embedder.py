@@ -9,7 +9,14 @@ _classifier = None
 def _get_classifier():
     global _classifier
     if _classifier is None:
-        from speechbrain.pretrained import EncoderClassifier
+        # SpeechBrain 1.0+ moved EncoderClassifier to speechbrain.inference;
+        # older releases keep it in speechbrain.pretrained. Support both so a
+        # fresh arm64 install (which pulls current speechbrain) doesn't break
+        # speaker matching with an ImportError.
+        try:
+            from speechbrain.inference import EncoderClassifier
+        except ImportError:
+            from speechbrain.pretrained import EncoderClassifier
         _classifier = EncoderClassifier.from_hparams(
             source=SPEECHBRAIN_MODEL,
             savedir=str(Path.home() / ".cache" / "speechbrain" / "ecapa-tdnn"),
@@ -25,10 +32,18 @@ def get_embedding(audio_path: str | Path, start: float = 0.0, end: Optional[floa
     audio_path = str(audio_path)
     waveform, sr = torchaudio.load(audio_path)
 
-    start_frame = int(start * sr)
+    start_frame = max(0, int(start * sr))
     end_frame = int(end * sr) if end is not None else waveform.shape[1]
     end_frame = min(end_frame, waveform.shape[1])
+    # A sub-frame turn (start≈end after int()) yields an empty slice, which
+    # makes encode_batch throw or produce NaNs. Require at least 0.2s of audio.
+    min_frames = int(0.2 * sr)
+    if end_frame - start_frame < min_frames:
+        end_frame = min(start_frame + min_frames, waveform.shape[1])
+        start_frame = max(0, end_frame - min_frames)
     segment = waveform[:, start_frame:end_frame]
+    if segment.shape[1] == 0:
+        raise RuntimeError("segmento de audio vacío para embedding")
 
     if sr != 16000:
         resampler = torchaudio.transforms.Resample(sr, 16000)
@@ -79,7 +94,7 @@ def extract_sample(
         "-ar", "16000",
         str(output_path),
     ]
-    subprocess.run(cmd, capture_output=True, check=True)
+    subprocess.run(cmd, capture_output=True, check=True, timeout=120)
     return str(output_path)
 
 
