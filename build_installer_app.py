@@ -616,7 +616,16 @@ def _run_installer_bg():
         _log_queue.put(("cancelled", None))
     except Exception as e:
         import traceback
-        _install_error[0] = traceback.format_exc()
+        tb = traceback.format_exc()
+        _install_error[0] = tb
+        # Persist the FULL traceback so it can be read even though the dialog
+        # truncates — the dialog only fits a few hundred chars.
+        try:
+            log_dir = Path.home() / "Library" / "Logs" / "VozMeet"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "installer_error.log").write_text(tb)
+        except Exception:
+            pass
         _log_queue.put(("error", str(e)))
 
 # ── Persistent progress window (main thread) ──────────────────────────────────
@@ -634,8 +643,8 @@ def _show_progress_window():
         _run_installer_bg()
         if _install_error[0]:
             _dialog("Error durante la instalacion:\n\n" +
-                    (_install_error[0] or "")[:400] +
-                    "\n\nCaptura este mensaje y reportalo.",
+                    (_install_error[0] or "")[-600:] +
+                    "\n\nLog completo: ~/Library/Logs/VozMeet/installer_error.log",
                     "VozMeet Installer - Error")
         return
 
@@ -706,8 +715,8 @@ def _show_progress_window():
 
     if _install_error[0]:
         _dialog("Error durante la instalacion:\n\n" +
-                (_install_error[0] or "")[:400] +
-                "\n\nCaptura este mensaje y reportalo.",
+                (_install_error[0] or "")[-600:] +
+                "\n\nLog completo: ~/Library/Logs/VozMeet/installer_error.log",
                 "VozMeet Installer - Error")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
