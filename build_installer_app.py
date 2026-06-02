@@ -217,19 +217,29 @@ def _do_update():
     _log("Extrayendo archivos actualizados...")
     _extract(B64, str(INSTALL_DIR))
 
-    # ── Reparacion: Python Intel (Rosetta) en un Mac Apple Silicon ───────────
-    # Un .venv creado con un Python Intel corre con Rosetta: WKWebView se cae
-    # (ventana en blanco que se cierra) y mlx no funciona. Lo reconstruimos con
-    # un Python nativo arm64. Los datos (data/, .env) NO se tocan.
-    if platform.machine() == "arm64" and not _venv_is_arm64():
-        _log("Detectado Python Intel (Rosetta). Reparando con Apple Silicon...")
+    # ── Reparacion: entorno Intel (x86_64) en un Mac Apple Silicon ───────────
+    # Un .venv creado con un Python Intel (o cuyos paquetes son wheels x86_64
+    # instalados bajo Rosetta) no carga las extensiones C en arm64: numpy/torch
+    # fallan con 'incompatible architecture' y el procesamiento se cae (rc=-11).
+    # Detectamos esto de dos formas — el python del venv no es arm64, O los
+    # paquetes nativos no se pueden importar — y reconstruimos el entorno con un
+    # Python nativo arm64. Los datos (data/, .env) NO se tocan.
+    #
+    # Usamos _host_is_apple_silicon() (sysctl hw.optional.arm64) en vez de
+    # platform.machine(), porque si el instalador corre bajo Rosetta este ultimo
+    # mentiria devolviendo 'x86_64' y la reparacion nunca se dispararia.
+    venv_arm64 = _venv_is_arm64()
+    venv_ok = _venv_imports_ok()
+    if _host_is_apple_silicon() and (not venv_arm64 or not venv_ok):
+        reason = ("Python Intel (Rosetta)" if not venv_arm64
+                  else "paquetes compilados para Intel (x86_64)")
+        _log("Detectado entorno incompatible: " + reason + ". Reconstruyendo arm64...")
         b = _dialog(
-            "VozMeet detecto que la instalacion actual usa una version\n"
-            "de Python para Intel (corriendo con Rosetta). Por eso la app\n"
-            "muestra una ventana en blanco y se cierra en tu Mac con\n"
-            "Apple Silicon.\n\n"
-            "El instalador instalara la version nativa (Apple Silicon) y\n"
-            "reconstruira el entorno. Tus voces y grabaciones NO se borraran.\n\n"
+            "VozMeet detecto que la instalacion actual usa componentes para\n"
+            "Intel (x86_64) que no funcionan en tu Mac con Apple Silicon.\n"
+            "Por eso el procesamiento de archivos se cae.\n\n"
+            "El instalador reconstruira el entorno con la version nativa\n"
+            "(Apple Silicon, arm64). Tus voces y grabaciones NO se borraran.\n\n"
             "Puede tardar 20-40 minutos y pedir tu contrasena de Mac.",
             "VozMeet - Reparar instalacion",
             ["Cancelar", "Reparar"])
@@ -280,7 +290,7 @@ def _do_update():
     _run([VENV_PIP, "install", "--quiet", "numpy>=1.24.0,<2.0.0"], timeout=300)
 
     deps = ["python-docx>=1.1.0"]
-    if platform.machine() == "arm64":
+    if _host_is_apple_silicon():
         deps += ["mlx-whisper>=0.4.0", "mlx-lm>=0.20.0"]
     for dep in deps:
         try:
@@ -346,7 +356,7 @@ def _create_venv_and_install(python_bin):
     _log("Dependencias instaladas.")
 
     # mlx (aceleracion Apple Silicon) — solo en arm64, no fatal si falla
-    if platform.machine() == "arm64":
+    if _host_is_apple_silicon():
         _log("Instalando aceleracion Apple Silicon (mlx)...")
         for dep in mlx_lines:
             try:
@@ -368,7 +378,7 @@ def _test_and_configure_mlx():
     so the app picks the fastest backend that is STABLE on this exact machine:
       - working Metal  -> mlx (Neural Engine) for transcription, MPS for diarization
       - broken Metal   -> faster-whisper + CPU diarization (reliable everywhere)."""
-    if platform.machine() != "arm64":
+    if not _host_is_apple_silicon():
         return  # Intel: no mlx / MPS
 
     _log("Verificando aceleracion Metal en este Mac (mlx + MPS)...")
@@ -450,6 +460,20 @@ def _build_app():
     subprocess.run(["killall", "Dock"], capture_output=True)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+def _host_is_apple_silicon():
+    """True if the physical CPU is Apple Silicon — reliable even when this
+    installer process itself is running under Rosetta (where platform.machine()
+    and uname -m both lie and report 'x86_64'). hw.optional.arm64 reflects the
+    real hardware, not the translated process."""
+    try:
+        r = subprocess.run(["sysctl", "-n", "hw.optional.arm64"],
+                           capture_output=True, text=True, timeout=10)
+        if r.stdout.strip() == "1":
+            return True
+    except Exception:
+        pass
+    return platform.machine() == "arm64"
+
 def _python_arch(py):
     """Return the architecture a given python runs as ('arm64', 'x86_64', '')."""
     try:
@@ -464,10 +488,23 @@ def _venv_is_arm64():
     """True if the installed venv python runs natively as arm64."""
     return _python_arch(VENV_PY) == "arm64"
 
+def _venv_imports_ok():
+    """Smoke-test the venv: can it actually import the native C-extensions?
+    A venv whose python is arm64 can still hold x86_64 wheels (installed long
+    ago under Rosetta), so checking the python arch alone is not enough — the
+    .so files fail to dlopen with 'incompatible architecture'. We import the
+    heaviest native deps and require success."""
+    if not Path(VENV_PY).exists():
+        return False
+    r = subprocess.run(
+        [VENV_PY, "-c", "import numpy, ctranslate2; print('OK')"],
+        capture_output=True, text=True)
+    return r.returncode == 0 and "OK" in r.stdout
+
 def _find_python():
     """Find a Python 3.11+. On Apple Silicon, only accept a NATIVE arm64 build
     (an Intel build runs under Rosetta and breaks WKWebView + mlx)."""
-    host_arm = platform.machine() == "arm64"
+    host_arm = _host_is_apple_silicon()
     candidates = [
         "/opt/homebrew/bin/python3.13",
         "/opt/homebrew/bin/python3.12",
@@ -544,15 +581,14 @@ def _install_python():
         py = _find_python()
     if not py or not Path(py).exists():
         raise RuntimeError("Python se instalo pero no se encontro el ejecutable.")
-    if platform.machine() == "arm64" and _python_arch(py) != "arm64":
+    if _host_is_apple_silicon() and _python_arch(py) != "arm64":
         raise RuntimeError(
             "Se instalo Python pero no es la version Apple Silicon (arm64).")
     _log("Python 3.11 (Apple Silicon) instalado.")
     return py
 
 def _install_ffmpeg(install_dir):
-    machine = platform.machine()
-    arch = "arm64" if machine == "arm64" else "x64"
+    arch = "arm64" if _host_is_apple_silicon() else "x64"
     url = ("https://github.com/eugeneware/ffmpeg-static/releases/"
            "download/b6.0/ffmpeg-darwin-" + arch)
     bin_dir = Path(install_dir) / "bin"
@@ -791,6 +827,9 @@ assert "_python_arch" in content, "missing arch detection"
 assert "_venv_is_arm64" in content, "missing venv arch check"
 assert "_create_venv_and_install" in content, "missing shared venv builder"
 assert "Rosetta" in content, "missing Intel/Rosetta repair"
+assert "hw.optional.arm64" in content, "missing reliable Apple Silicon detection"
+assert "_venv_imports_ok" in content, "missing venv import smoke-test"
+assert "_host_is_apple_silicon" in content, "missing host arch helper"
 # Verify shell launcher
 shell_content = exe.read_text()
 assert shell_content.startswith("#!/bin/sh"), "launcher must be a sh script"
