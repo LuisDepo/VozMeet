@@ -233,18 +233,12 @@ def _do_update():
     if _host_is_apple_silicon() and (not venv_arm64 or not venv_ok):
         reason = ("Python Intel (Rosetta)" if not venv_arm64
                   else "paquetes compilados para Intel (x86_64)")
-        _log("Detectado entorno incompatible: " + reason + ". Reconstruyendo arm64...")
-        b = _dialog(
-            "VozMeet detecto que la instalacion actual usa componentes para\n"
-            "Intel (x86_64) que no funcionan en tu Mac con Apple Silicon.\n"
-            "Por eso el procesamiento de archivos se cae.\n\n"
-            "El instalador reconstruira el entorno con la version nativa\n"
-            "(Apple Silicon, arm64). Tus voces y grabaciones NO se borraran.\n\n"
-            "Puede tardar 20-40 minutos y pedir tu contrasena de Mac.",
-            "VozMeet - Reparar instalacion",
-            ["Cancelar", "Reparar"])
-        if b == "Cancelar":
-            sys.exit(0)
+        # Rebuild automatically — no confirmation dialog. The Intel venv simply
+        # does not work on this Mac, so there is no useful "cancel" choice; we
+        # just inform the user it's happening and proceed. Data is preserved.
+        _log("Detectado entorno incompatible: " + reason + ".")
+        _log("Reconstruyendo el entorno como Apple Silicon (arm64). "
+             "Puede tardar 20-40 min. Tus voces y grabaciones NO se borraran.")
 
         python_bin = _find_python()
         if not python_bin:
