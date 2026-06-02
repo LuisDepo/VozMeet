@@ -831,11 +831,44 @@ assert "installer.py" in shell_content, "launcher must call installer.py"
 assert "python3" in shell_content, "launcher must find python3"
 print("Content checks: OK")
 
+# ── .command fallback (beats Gatekeeper quarantine on .app bundles) ──────────
+# macOS blocks unsigned .app bundles downloaded from the internet with
+# "No se encuentra el archivo".  A .command file shows a friendlier
+# "Are you sure?" dialog that the user can approve with a single click.
+# Both launchers are included; users can use whichever works.
+COMMAND_LAUNCHER = r'''#!/bin/sh
+# VozMeet Installer — fallback launcher (use if the .app shows "No se encuentra el archivo")
+DIR="$(cd "$(dirname "$0")" && pwd)"
+PY=""
+for candidate in \
+    /usr/bin/python3 \
+    /opt/homebrew/bin/python3 \
+    /usr/local/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11 \
+    /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 \
+    /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 \
+    python3; do
+    if [ -x "$candidate" ] 2>/dev/null || command -v "$candidate" >/dev/null 2>&1; then
+        PY="$candidate"
+        break
+    fi
+done
+if [ -z "$PY" ]; then
+    osascript -e 'display dialog "Python 3 no encontrado.\n\nInstala Python desde python.org y vuelve a abrir el instalador." buttons {"OK"} default button "OK" with icon stop with title "VozMeet Installer"'
+    exit 1
+fi
+exec "$PY" "$DIR/VozMeet-Installer.app/Contents/MacOS/installer.py" "$@"
+'''
+command_file = Path("/tmp/VozMeet-Installer.command")
+command_file.write_text(COMMAND_LAUNCHER)
+command_file.chmod(0o755)
+
 # ── Zip ───────────────────────────────────────────────────────────────────────
 # Use zipfile.ZipInfo to set permissions explicitly so macOS Archive Utility
 # honours the execute bit on the shell launcher after extraction.
 zip_path = Path("/tmp/VozMeet-Installer.zip")
 with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
+    # .app bundle
     for path in sorted(app_root.rglob("*")):
         arcname = str(path.relative_to(app_root.parent))
         if path.is_dir():
@@ -849,6 +882,12 @@ with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
             zi.external_attr = (mode & 0xFFFF) << 16
             zi.create_system = 3  # Unix
             zf.writestr(zi, path.read_bytes())
+    # .command fallback — always executable, Gatekeeper shows "Open?" dialog
+    zi = zipfile.ZipInfo("VozMeet-Installer.command")
+    zi.compress_type = zipfile.ZIP_DEFLATED
+    zi.external_attr = (0o755 & 0xFFFF) << 16
+    zi.create_system = 3
+    zf.writestr(zi, command_file.read_bytes())
 
 print(f"ZIP: {zip_path}  ({zip_path.stat().st_size:,} bytes)")
 print("DONE — ready to upload")
