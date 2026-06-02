@@ -1,7 +1,6 @@
 from pathlib import Path
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
-from app.database.db import get_db
 
 router = APIRouter()
 
@@ -16,14 +15,5 @@ def get_logs(lines: int = 100):
     tail = "\n".join(text.splitlines()[-lines:])
     return PlainTextResponse(tail)
 
-
-@router.get("/recordings/{recording_id}/error")
-def get_recording_error(recording_id: int):
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT error_message, status FROM recordings WHERE id = ?",
-            (recording_id,),
-        ).fetchone()
-    if not row:
-        return {"error": None, "status": "not_found"}
-    return {"error": row["error_message"], "status": row["status"]}
+# Note: GET /recordings/{id}/error lives in recordings.py (the canonical owner).
+# A duplicate previously here was shadowed by router registration order.

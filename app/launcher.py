@@ -224,17 +224,37 @@ def _write_error_log(msg: str):
 
 
 def _free_port():
-    """Kill any process using port 8765 so we can bind fresh."""
+    """Free port 8765 if a STALE VozMeet instance is holding it. Only kills a
+    process we can confirm is a VozMeet/python server — never an unrelated app
+    that happens to use the port, and never our own PID."""
     import subprocess
     try:
         r = subprocess.run(
             ["lsof", "-ti", "tcp:8765"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
-        if r.returncode == 0 and r.stdout.strip():
-            for pid in r.stdout.strip().split("\n"):
-                subprocess.run(["kill", "-9", pid.strip()], capture_output=True)
-            time.sleep(0.5)
+        if r.returncode != 0 or not r.stdout.strip():
+            return
+        my_pid = os.getpid()
+        for pid in r.stdout.strip().split("\n"):
+            pid = pid.strip()
+            if not pid or not pid.isdigit() or int(pid) == my_pid:
+                continue
+            # Confirm the holder is a VozMeet/python process before killing.
+            try:
+                info = subprocess.run(
+                    ["ps", "-p", pid, "-o", "command="],
+                    capture_output=True, text=True, timeout=10).stdout.lower()
+            except Exception:
+                info = ""
+            if "vozmeet" not in info and "python" not in info:
+                # Unknown process on our port — don't touch it.
+                continue
+            # Graceful first, then force.
+            subprocess.run(["kill", pid], capture_output=True, timeout=10)
+            time.sleep(0.3)
+            subprocess.run(["kill", "-9", pid], capture_output=True, timeout=10)
+        time.sleep(0.5)
     except Exception:
         pass
 

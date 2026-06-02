@@ -17,6 +17,12 @@ def _deserialize(blob: bytes) -> np.ndarray:
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    a = np.asarray(a).ravel()
+    b = np.asarray(b).ravel()
+    # Different embedding dimensions (e.g. a stored zero-dummy or a model change)
+    # must not raise inside the identify loop — treat as "no match".
+    if a.shape != b.shape or a.size == 0:
+        return 0.0
     a = a / (np.linalg.norm(a) + 1e-8)
     b = b / (np.linalg.norm(b) + 1e-8)
     return float(np.dot(a, b))
@@ -84,14 +90,24 @@ def update_speaker_embedding(speaker_id: int, new_embedding: np.ndarray):
         ).fetchone()
         if not row:
             return
-        old = _deserialize(row["embedding"])
-        count = row["embedding_count"]
-        averaged = (old * count + new_embedding) / (count + 1)
+        old = np.asarray(_deserialize(row["embedding"])).ravel()
+        new_v = np.asarray(new_embedding).ravel()
+        count = row["embedding_count"] or 0
+        # If the stored embedding is a placeholder (all-zeros, empty, count 0, or
+        # a different dimension), replace it outright instead of averaging — that
+        # would otherwise permanently bias the real voiceprint toward zero.
+        if (count <= 0 or old.size != new_v.size
+                or not np.any(old) or float(np.linalg.norm(old)) < 1e-6):
+            averaged = new_v
+            new_count = 1
+        else:
+            averaged = (old * count + new_v) / (count + 1)
+            new_count = count + 1
         averaged = averaged / (np.linalg.norm(averaged) + 1e-8)
         conn.execute(
             "UPDATE speakers SET embedding = ?, embedding_count = ?, updated_at = CURRENT_TIMESTAMP "
             "WHERE id = ?",
-            (_serialize(averaged), count + 1, speaker_id),
+            (_serialize(averaged), new_count, speaker_id),
         )
 
 

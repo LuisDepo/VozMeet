@@ -19,12 +19,19 @@ async def start_processing(recording_id: int):
             "SELECT id, original_path, status FROM recordings WHERE id = ?",
             (recording_id,),
         ).fetchone()
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Grabación no encontrada.")
-
-    if row["status"] == "processing":
-        raise HTTPException(status_code=409, detail="Ya está siendo procesada.")
+        if not row:
+            raise HTTPException(status_code=404, detail="Grabación no encontrada.")
+        if row["status"] == "processing":
+            raise HTTPException(status_code=409, detail="Ya está siendo procesada.")
+        # Atomically claim the recording so two rapid POSTs (double-click,
+        # resume race) can't both pass the check and start two pipeline threads
+        # on the same recording (double-written segments, double-counted time).
+        cur = conn.execute(
+            "UPDATE recordings SET status='processing' WHERE id=? AND status!='processing'",
+            (recording_id,),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=409, detail="Ya está siendo procesada.")
 
     queue: asyncio.Queue = asyncio.Queue()
     _sse_queues[recording_id] = queue

@@ -281,13 +281,20 @@ def _do_update():
     # mentiria devolviendo 'x86_64' y la reparacion nunca se dispararia.
     venv_arm64 = _venv_is_arm64()
     venv_ok = _venv_imports_ok()
-    if _host_is_apple_silicon() and (not venv_arm64 or not venv_ok):
-        reason = ("Python Intel (Rosetta)" if not venv_arm64
-                  else "paquetes compilados para Intel (x86_64)")
-        # Rebuild automatically — no confirmation dialog. The Intel venv simply
-        # does not work on this Mac, so there is no useful "cancel" choice; we
-        # just inform the user it's happening and proceed. Data is preserved.
-        _log("Detectado entorno incompatible: " + reason + ".")
+    # Rebuild the venv when EITHER it's an Intel python on Apple Silicon, OR its
+    # native packages simply don't import (broken/half-built/x86_64 wheels) — on
+    # any architecture, so an Intel Mac with a broken venv isn't stuck forever.
+    needs_rebuild = (_host_is_apple_silicon() and not venv_arm64) or not venv_ok
+    if needs_rebuild:
+        if _host_is_apple_silicon() and not venv_arm64:
+            reason = "Python Intel (Rosetta) en un Mac Apple Silicon"
+        elif not venv_ok:
+            reason = "el entorno actual no carga (paquetes incompatibles o incompletos)"
+        else:
+            reason = "entorno incompatible"
+        # Rebuild automatically — no confirmation dialog. A broken venv has no
+        # useful "cancel" choice; inform the user and proceed. Data is preserved.
+        _log("Detectado: " + reason + ".")
         _log("Reconstruyendo el entorno como Apple Silicon (arm64). "
              "Puede tardar 20-40 min. Tus voces y grabaciones NO se borraran.")
 
@@ -309,11 +316,12 @@ def _do_update():
 
         _create_venv_and_install(python_bin)
 
-        _log("Construyendo VozMeet.app (Apple Silicon)...")
+        _log("Construyendo VozMeet.app...")
         _build_app()
 
         _dialog(
-            "VozMeet se reparo y ahora usa Python nativo Apple Silicon.\n\n"
+            "VozMeet se reparo: el entorno se reconstruyo correctamente para "
+            "este Mac.\n\n"
             "Tus voces y grabaciones se conservaron.\n\n"
             "Abre VozMeet desde la carpeta Aplicaciones.",
             "Reparacion completada")
@@ -328,31 +336,21 @@ def _do_update():
 
     _log("Instalando dependencias nuevas...")
     # Pin numpy<2 FIRST — torch's C API is incompatible with numpy 2.x and
-    # SIGSEGVs on import (rc=-11) even on CPU.  An existing install may already
-    # have numpy 2.x, and the mlx --upgrade below can pull it back in, so force
-    # the downgrade here and verify it actually took.
+    # SIGSEGVs on import (rc=-11) even on CPU.
     _log("Fijando numpy<2 (requerido por torch)...")
-    _run([VENV_PIP, "install", "--quiet", "numpy>=1.24.0,<2.0.0"], timeout=300)
+    _run([VENV_PY, "-m", "pip", "install", "--quiet", "numpy>=1.24.0,<2.0.0"], timeout=300)
 
     deps = ["python-docx>=1.1.0"]
     if _host_is_apple_silicon():
         deps += ["mlx-whisper>=0.4.0", "mlx-lm>=0.20.0"]
     for dep in deps:
-        try:
-            _log("  -> " + dep)
-            _run([VENV_PIP, "install", "--quiet", "--upgrade", dep], timeout=600)
-        except Exception:
-            pass
+        _log("  -> " + dep)
+        dr = _run([VENV_PY, "-m", "pip", "install", "--quiet", "--upgrade", dep], timeout=600)
+        if dr.returncode != 0:
+            _log("  (aviso) no se pudo actualizar " + dep)
 
-    # mlx/--upgrade may have dragged numpy 2.x back in. Re-pin and confirm the
-    # installed numpy is <2 so torch can import.
-    _log("Verificando numpy<2...")
-    _run([VENV_PIP, "install", "--quiet", "numpy>=1.24.0,<2.0.0"], timeout=300)
-    nv = _run([VENV_PY, "-c", "import numpy,sys;sys.exit(0 if numpy.__version__[0]=='1' else 1)"])
-    if nv.returncode != 0:
-        _log("numpy 2.x persiste — forzando reinstalacion limpia de numpy<2...")
-        _run([VENV_PIP, "install", "--quiet", "--force-reinstall",
-              "numpy>=1.24.0,<2.0.0"], timeout=300)
+    # mlx/--upgrade may have dragged numpy 2.x back in. Re-pin + verify.
+    _enforce_numpy_lt2()
 
     # Re-test Metal compatibility every update — mlx may have been fixed upstream
     _test_and_configure_mlx()
@@ -372,13 +370,30 @@ def _do_update():
 
 # ── Shared: create venv + install all dependencies ───────────────────────────
 def _create_venv_and_install(python_bin):
+    # The AI deps (torch, etc.) need several GB; fail early with a clear message
+    # rather than mid-install with an opaque pip error.
+    try:
+        free_gb = shutil.disk_usage(str(Path.home())).free / (1024 ** 3)
+        if free_gb < 5:
+            raise RuntimeError(
+                "Espacio en disco insuficiente: quedan %.1f GB libres y VozMeet "
+                "necesita al menos 5 GB. Libera espacio y reintenta." % free_gb)
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+
     _log("Creando entorno virtual Python...")
     r = _run([python_bin, "-m", "venv", str(INSTALL_DIR / ".venv")])
     if r.returncode != 0:
-        raise RuntimeError("No se pudo crear el entorno virtual:\n" + r.stderr)
+        raise RuntimeError("No se pudo crear el entorno virtual:\n" + (r.stderr or ""))
 
     _log("Actualizando pip...")
-    _run([VENV_PIP, "install", "--upgrade", "pip", "--quiet"])
+    # ensurepip guarantees pip exists even if the venv bootstrap pip step was
+    # skipped/failed; then upgrade. Check nothing fatal — `python -m pip` below
+    # works as long as pip is importable.
+    _run([VENV_PY, "-m", "ensurepip", "--upgrade"], timeout=300)
+    _run([VENV_PY, "-m", "pip", "install", "--upgrade", "pip", "--quiet"], timeout=300)
 
     _log("Instalando dependencias (puede tardar 20-40 min)...")
     reqs_path = INSTALL_DIR / "requirements.txt"
@@ -390,27 +405,61 @@ def _create_venv_and_install(python_bin):
     # will SIGSEGV on import even on CPU.  Install it alone so pip can't
     # back-solve a 2.x version to satisfy another package's loose bound.
     _log("Fijando numpy<2 (requerido por torch)...")
-    _run([VENV_PIP, "install", "--quiet", "numpy>=1.24.0,<2.0.0"], timeout=300)
+    _run([VENV_PY, "-m", "pip", "install", "--quiet", "numpy>=1.24.0,<2.0.0"], timeout=300)
 
     core_req = INSTALL_DIR / "_req_core.txt"
     core_req.write_text("\n".join(core_lines) + "\n")
-    r = _run([VENV_PIP, "install", "-r", str(core_req), "--quiet"], timeout=3600)
+    r = _run([VENV_PY, "-m", "pip", "install", "-r", str(core_req), "--quiet"], timeout=3600)
     core_req.unlink(missing_ok=True)
     if r.returncode != 0:
-        raise RuntimeError("Error instalando dependencias:\n" + r.stderr[-1000:])
+        raise RuntimeError("Error instalando dependencias:\n" + (r.stderr or "")[-1200:])
     _log("Dependencias instaladas.")
 
     # mlx (aceleracion Apple Silicon) — solo en arm64, no fatal si falla
     if _host_is_apple_silicon():
         _log("Instalando aceleracion Apple Silicon (mlx)...")
         for dep in mlx_lines:
-            try:
-                _log("  -> " + dep)
-                _run([VENV_PIP, "install", "--quiet", dep], timeout=600)
-            except Exception:
-                pass
-        _log("Aceleracion mlx lista.")
+            _log("  -> " + dep)
+            mr = _run([VENV_PY, "-m", "pip", "install", "--quiet", dep], timeout=600)
+            if mr.returncode != 0:
+                _log("  (aviso) no se pudo instalar " + dep + " — la app usara "
+                     "faster-whisper en su lugar.")
+
+    # mlx (and any --upgrade) can drag numpy 2.x back in, which breaks torch.
+    # Re-pin, then VERIFY the version actually took; force-reinstall if not.
+    _enforce_numpy_lt2()
+
+    # Final smoke-test: the venv must be able to IMPORT the core runtime on this
+    # machine's architecture. pip returning 0 only means the resolver finished —
+    # it does NOT prove torch/ctranslate2 load (x86_64 wheels on arm64, numpy
+    # ABI breaks, etc. all fail here, not at pip time). Catch it now, with a
+    # clear message, instead of letting the app crash on first launch.
+    _log("Verificando que el entorno funcione en este Mac...")
+    check = _run([VENV_PY, "-c",
+                  "import numpy, ctranslate2, faster_whisper; "
+                  "assert numpy.__version__[0]=='1', 'numpy '+numpy.__version__; "
+                  "print('OK')"], timeout=180)
+    if check.returncode != 0 or "OK" not in (check.stdout or ""):
+        raise RuntimeError(
+            "El entorno se instalo pero no carga correctamente en este Mac:\n"
+            + ((check.stderr or check.stdout or "")[-1200:])
+            + "\n\nReabre el instalador para reintentar.")
+    _log("Entorno verificado correctamente.")
+
+    if _host_is_apple_silicon():
         _test_and_configure_mlx()
+
+
+def _enforce_numpy_lt2():
+    """Pin numpy<2 and confirm it stuck; force-reinstall if a 2.x slipped in."""
+    _run([VENV_PY, "-m", "pip", "install", "--quiet", "numpy>=1.24.0,<2.0.0"], timeout=300)
+    nv = _run([VENV_PY, "-c",
+               "import numpy,sys;sys.exit(0 if numpy.__version__[0]=='1' else 1)"],
+              timeout=60)
+    if nv.returncode != 0:
+        _log("numpy 2.x persiste — forzando reinstalacion limpia de numpy<2...")
+        _run([VENV_PY, "-m", "pip", "install", "--quiet", "--force-reinstall",
+              "numpy>=1.24.0,<2.0.0"], timeout=300)
 
 # ── Shared: test Metal / mlx + torch MPS compatibility ───────────────────────
 def _test_and_configure_mlx():
@@ -498,8 +547,14 @@ def _build_app():
     lsreg = ("/System/Library/Frameworks/CoreServices.framework"
              "/Frameworks/LaunchServices.framework/Support/lsregister")
     if os.path.exists(lsreg):
-        subprocess.run([lsreg, "-f", str(dest)], capture_output=True)
-    subprocess.run(["killall", "Dock"], capture_output=True)
+        try:
+            subprocess.run([lsreg, "-f", str(dest)], capture_output=True, timeout=30)
+        except Exception:
+            pass
+    try:
+        subprocess.run(["killall", "Dock"], capture_output=True, timeout=15)
+    except Exception:
+        pass
     return dest
 
 
@@ -529,7 +584,8 @@ def _install_app_bundle(APP):
               "/usr/bin/ditto '" + str(APP) + "' '/Applications/VozMeet.app'")
         osa = 'do shell script "' + sh.replace('"', '\\"') + \
               '" with administrator privileges'
-        r = subprocess.run(["osascript", "-e", osa], capture_output=True, text=True)
+        r = subprocess.run(["osascript", "-e", osa], capture_output=True,
+                           text=True, timeout=600)
         if r.returncode == 0 and sys_dest.exists():
             return sys_dest
     except Exception:
@@ -589,9 +645,12 @@ def _venv_imports_ok():
     heaviest native deps and require success."""
     if not Path(VENV_PY).exists():
         return False
-    r = subprocess.run(
-        [VENV_PY, "-c", "import numpy, ctranslate2; print('OK')"],
-        capture_output=True, text=True)
+    try:
+        r = subprocess.run(
+            [VENV_PY, "-c", "import numpy, ctranslate2; print('OK')"],
+            capture_output=True, text=True, timeout=120)
+    except Exception:
+        return False
     return r.returncode == 0 and "OK" in r.stdout
 
 def _find_python():
@@ -610,16 +669,24 @@ def _find_python():
         "/usr/local/bin/python3.11",
     ]
     for py in ["python3.11", "python3.12", "python3.13", "python3"]:
-        r = subprocess.run(["which", py], capture_output=True, text=True)
+        try:
+            r = subprocess.run(["which", py], capture_output=True, text=True, timeout=10)
+        except Exception:
+            continue
         if r.returncode == 0 and r.stdout.strip():
             candidates.append(r.stdout.strip())
 
     for p in candidates:
         if not Path(p).exists():
             continue
-        ver = subprocess.run(
-            [p, "-c", "import sys; print(sys.version_info.minor)"],
-            capture_output=True, text=True).stdout.strip()
+        # timeout: a wedged python binary (missing dylibs after a Homebrew
+        # migration) must not hang the whole installer at "Buscando Python".
+        try:
+            ver = subprocess.run(
+                [p, "-c", "import sys; print(sys.version_info.minor)"],
+                capture_output=True, text=True, timeout=15).stdout.strip()
+        except Exception:
+            continue
         try:
             if int(ver) < 11:
                 continue
@@ -658,7 +725,11 @@ def _install_python():
     osa = 'do shell script "' + shell_cmd.replace('"', '\\"') + \
           '" with administrator privileges'
     _log("Instalando Python (solicita contrasena de Mac)...")
-    r = subprocess.run(["osascript", "-e", osa], capture_output=True, text=True)
+    try:
+        r = subprocess.run(["osascript", "-e", osa], capture_output=True,
+                           text=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("La instalacion de Python tardo demasiado (timeout).")
     if r.returncode != 0:
         raise RuntimeError(
             "No se pudo instalar Python.\n" +
@@ -668,6 +739,20 @@ def _install_python():
         os.remove(pkg)
     except Exception:
         pass
+
+    # python.org ships a separate "Install Certificates.command" that wires up
+    # CA certs; if it never runs, urllib (and some tools) hit
+    # CERTIFICATE_VERIFY_FAILED. Run it best-effort so downloads work.
+    for cert_cmd in [
+        "/Applications/Python 3.11/Install Certificates.command",
+        "/Applications/Python 3.12/Install Certificates.command",
+        "/Applications/Python 3.13/Install Certificates.command",
+    ]:
+        if Path(cert_cmd).exists():
+            try:
+                subprocess.run(["/bin/sh", cert_cmd], capture_output=True, timeout=120)
+            except Exception:
+                pass
 
     py = "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11"
     if not Path(py).exists():
@@ -688,16 +773,37 @@ def _install_ffmpeg(install_dir):
     bin_dir.mkdir(parents=True, exist_ok=True)
     target = bin_dir / "ffmpeg"
 
-    _urlretrieve(url, str(target))
-    target.chmod(0o755)
-    subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(target)],
-                   capture_output=True)
+    # Retry the download a couple of times for transient network blips.
+    last = None
+    for attempt in range(3):
+        try:
+            _urlretrieve(url, str(target))
+            if target.stat().st_size > 1_000_000:  # a real ffmpeg is ~70 MB
+                last = None
+                break
+            last = RuntimeError("descarga incompleta de ffmpeg")
+        except Exception as e:
+            last = e
+        time.sleep(2)
+    if last is not None:
+        raise RuntimeError("No se pudo descargar ffmpeg: " + str(last))
 
-    r = subprocess.run([str(target), "-version"], capture_output=True, text=True)
+    target.chmod(0o755)
+    try:
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(target)],
+                       capture_output=True, timeout=30)
+    except Exception:
+        pass
+
+    try:
+        r = subprocess.run([str(target), "-version"], capture_output=True,
+                           text=True, errors="replace", timeout=30)
+    except Exception as e:
+        raise RuntimeError("ffmpeg se descargo pero no se pudo ejecutar: " + str(e))
     if r.returncode != 0:
         raise RuntimeError(
             "ffmpeg se descargo pero no se pudo ejecutar:\n" +
-            (r.stderr or r.stdout)[:400] +
+            ((r.stderr or r.stdout) or "")[:400] +
             "\n\nInstala ffmpeg manualmente con: brew install ffmpeg")
     return str(target)
 

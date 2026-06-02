@@ -40,6 +40,15 @@ def _get_pipeline():
                     "  2. https://huggingface.co/pyannote/segmentation-3.0\n"
                     "Ingresa con tu cuenta de HuggingFace y acepta en cada enlace."
                 ) from e
+            low = msg.lower()
+            if ("connection" in low or "timed out" in low or "timeout" in low
+                    or "network" in low or "resolve" in low or "ssl" in low
+                    or "max retries" in low):
+                raise RuntimeError(
+                    "No se pudo descargar el modelo de separación de voces "
+                    "(pyannote). Revisa tu conexión a internet e inténtalo de "
+                    "nuevo; la primera vez requiere descargar el modelo."
+                ) from e
             raise
     return _pipeline
 

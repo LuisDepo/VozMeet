@@ -297,11 +297,12 @@ def get_transcript(recording_id: int):
 def get_recording_error(recording_id: int):
     with get_db() as conn:
         row = conn.execute(
-            "SELECT error_message FROM recordings WHERE id=?", (recording_id,)
+            "SELECT error_message, status FROM recordings WHERE id=?", (recording_id,)
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Grabación no encontrada.")
-    return {"error": row["error_message"] or "Sin detalles de error."}
+    return {"error": row["error_message"] or "Sin detalles de error.",
+            "status": row["status"]}
 
 
 @router.delete("/recordings/{recording_id}")
@@ -317,6 +318,19 @@ def delete_recording(recording_id: int):
         if rec["processed_path"]:
             try:
                 Path(rec["processed_path"]).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        # Delete the original uploaded media (mp3/mp4/m4a) — otherwise every
+        # deleted recording leaks its upload (up to ~500 MB each) forever.
+        if rec["original_path"]:
+            try:
+                from app.config import UPLOADS_DIR
+                orig = Path(rec["original_path"])
+                # Only remove files that live in our uploads dir (defensive:
+                # never touch a file outside it, whatever the DB says).
+                if orig.resolve().parent == Path(UPLOADS_DIR).resolve():
+                    orig.unlink(missing_ok=True)
             except Exception:
                 pass
 

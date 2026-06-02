@@ -14,9 +14,21 @@ _progress_callbacks: dict[int, Callable] = {}
 _pipeline_results: dict[int, dict] = {}
 _pipeline_errors: dict[int, str] = {}
 
+# Keep these module-level maps from growing unbounded over a long session that
+# processes many recordings. Results/errors are kept long enough for the UI to
+# fetch them; we only evict the oldest once well past what any UI would re-query.
+_MAX_TRACKED = 100
+
+
+def _evict_old():
+    for d in (_progress_callbacks, _pipeline_results, _pipeline_errors):
+        while len(d) > _MAX_TRACKED:
+            d.pop(next(iter(d)), None)
+
 
 def register_progress_callback(recording_id: int, callback: Callable):
     _progress_callbacks[recording_id] = callback
+    _evict_old()
 
 
 def get_pipeline_result(recording_id: int) -> Optional[dict]:
