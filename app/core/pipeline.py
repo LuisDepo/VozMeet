@@ -147,13 +147,35 @@ def _execute_pipeline(recording_id: int, file_path: str):
         _disable_accelerators()
         _notify(recording_id, 10, "Optimizando para este equipo",
                 "Reintentando en modo CPU (compatible con cualquier Mac)...")
-        transcript_result, diarization_segments = _run_heavy_stage(
-            recording_id, wav_path, _transcription_progress, cpu_only=True)
+        try:
+            transcript_result, diarization_segments = _run_heavy_stage(
+                recording_id, wav_path, _transcription_progress, cpu_only=True)
+        except _AcceleratorCrash as crash2:
+            # Both metal and CPU attempts crashed (likely torch broken on this machine).
+            # Fall back to transcription only — faster-whisper never needs torch.
+            log.error("[%d] CPU retry also crashed (rc=%s) — falling back to "
+                      "transcription-only (no speaker separation).\n%s",
+                      recording_id, crash2.returncode, crash2.tail)
+            _notify(recording_id, 10, "Procesando audio",
+                    "Transcribiendo sin separación de voces (modo de compatibilidad)...")
+            _run_heavy_stage._no_diarize = True
+            try:
+                transcript_result, diarization_segments = _run_heavy_stage(
+                    recording_id, wav_path, _transcription_progress, cpu_only=True)
+            finally:
+                _run_heavy_stage._no_diarize = False
 
     transcript_segments = transcript_result["segments"]
     language = transcript_result["language"]
     language_display = transcript_result["language_display"]
     log.info("[%d] Transcription done: %d segments, lang=%s", recording_id, len(transcript_segments), language)
+
+    # When diarization was skipped (torch unavailable), synthesise a single
+    # speaker entry covering the full audio so the merge stage still works.
+    if not diarization_segments and transcript_segments:
+        full_end = transcript_segments[-1]["end"]
+        diarization_segments = [{"start": 0.0, "end": full_end, "speaker": "Hablante 1"}]
+        log.info("[%d] No diarization — using single-speaker fallback", recording_id)
 
     unique_speakers = list({s["speaker"] for s in diarization_segments})
     speaker_count = len(unique_speakers)
@@ -167,7 +189,7 @@ def _execute_pipeline(recording_id: int, file_path: str):
             "UPDATE recordings SET language_detected=?, speaker_count=?, pipeline_stage='diarized' WHERE id=?",
             (language_display, speaker_count, recording_id),
         )
-    _notify(recording_id, 68, "Transcripción y diarización completas",
+    _notify(recording_id, 68, "Transcripción completa",
             f"Idioma: {language_display} · {len(transcript_segments)} fragmentos · {speaker_count} voces")
 
     # ── Stage 4: Merge ───────────────────────────────────────────────────────
@@ -324,8 +346,12 @@ def _run_heavy_stage(recording_id: int, wav_path: str, progress_cb, cpu_only: bo
     if cpu_only:
         env["VOZMEET_FORCE_CPU"] = "1"
 
+    cmd = [sys.executable, "-m", "app.core.heavy_worker", str(wav_path), str(out_json)]
+    if getattr(_run_heavy_stage, "_no_diarize", False):
+        cmd.append("--no-diarize")
+
     proc = subprocess.Popen(
-        [sys.executable, "-m", "app.core.heavy_worker", str(wav_path), str(out_json)],
+        cmd,
         cwd=str(INSTALL_DIR), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )

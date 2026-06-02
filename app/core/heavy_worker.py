@@ -1,7 +1,7 @@
 """
 Isolated worker for the GPU/Metal-heavy pipeline stage.
 
-Run as:  python -m app.core.heavy_worker <wav_path> <out_json>
+Run as:  python -m app.core.heavy_worker <wav_path> <out_json> [--no-diarize]
 
 Transcription (mlx / faster-whisper) and diarization (pyannote, optionally on
 Metal/MPS) both touch C-extensions that can abort() the whole process on some
@@ -20,12 +20,12 @@ import concurrent.futures
 
 def main() -> int:
     if len(sys.argv) < 3:
-        sys.stderr.write("usage: heavy_worker <wav_path> <out_json>\n")
+        sys.stderr.write("usage: heavy_worker <wav_path> <out_json> [--no-diarize]\n")
         return 2
     wav_path, out_json = sys.argv[1], sys.argv[2]
+    no_diarize = "--no-diarize" in sys.argv
 
     from app.core.transcriber import transcribe
-    from app.core.diarizer import diarize
 
     def _progress(frac: float):
         try:
@@ -34,11 +34,17 @@ def main() -> int:
         except Exception:
             pass
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-        future_tx = ex.submit(transcribe, wav_path, None, _progress)
-        future_di = ex.submit(diarize, wav_path)
-        transcript = future_tx.result()
-        diarization = future_di.result()
+    if no_diarize:
+        # Transcription only — never imports torch/pyannote, always works.
+        transcript = transcribe(wav_path, None, _progress)
+        diarization = []
+    else:
+        from app.core.diarizer import diarize
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            future_tx = ex.submit(transcribe, wav_path, None, _progress)
+            future_di = ex.submit(diarize, wav_path)
+            transcript = future_tx.result()
+            diarization = future_di.result()
 
     with open(out_json, "w") as f:
         json.dump({"transcript": transcript, "diarization": diarization}, f)
